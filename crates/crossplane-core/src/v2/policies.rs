@@ -24,3 +24,31 @@ impl ManagementPolicies {
         self.0.is_empty()
     }
 }
+
+/// `xpv2.DeletionPolicy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum DeletionPolicy {
+    Orphan,
+    Delete,
+}
+
+/// `xpv2.UpdatePolicy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum UpdatePolicy {
+    Automatic,
+    Manual,
+}
+
+/// `xpv2.ResolvePolicy`. Go has one constant and the schema enum adds `IfNotPresent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum ResolvePolicy {
+    Always,
+    IfNotPresent,
+}
+
+/// `xpv2.ResolutionPolicy`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum ResolutionPolicy {
+    Required,
+    Optional,
+}
