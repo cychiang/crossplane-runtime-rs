@@ -199,6 +199,30 @@ Deviations of the scaffold from the synthesis brief:
   `DefaultEnvars`.
 - `hack/port-coverage.sh` gained two flags the brief did not ask for: `--complete` (fail while
   anything is missing) and `--list-missing`.
+- Units 1.2 and 1.3 (core/v2, errors, meta, conditions, feature, event, logging):
+  - `port-denominator.tsv` had no `core/v2` rows. The 31 cases of `condition_test.go` were added
+    with `hack/go-test-inventory.sh`, so the denominator is now 408. `AIsNil` and `BIsNil` are
+    skipped: a nil `*ConditionedStatus` cannot be built, so `ConditionedStatus::equal` takes two
+    references.
+  - `Condition::equal` was strict about `observedGeneration`. Go ignores it when either side is
+    zero (`IdenticalWithMissingObservedGeneration` forced the fix).
+  - Go's empty `Status` has no `ConditionStatus` value. Cases that leave it unset use `Unknown` on
+    both sides; no expectation depends on it.
+  - `external_create_succeeded_during` takes `now: Timestamp` where Go calls `time.Since`. The
+    scaffold had no such function. The reconciler passes its `Clock`.
+  - Empty `labels`, `annotations` and `finalizers` become `None` after a removal. Go leaves an
+    empty collection that `omitempty` drops from the JSON, so `RemoveFinalizer/FinalizerExists`
+    expects `None` here.
+  - `Error::cause` was added for `errors.Cause`. `Wrapf` has no Rust function; its cases run
+    `wrap_err` over a `format!` message.
+  - `TestOGConditionSetMark` is an integration test in `crossplane-runtime/tests/conditions.rs`
+    because core cannot dev-depend on `crossplane-test`. The feature, event and logging tests are
+    integration tests too, so `event.rs` and `reconciler/mod.rs` (unit 1.9's) carry no test blocks
+    from unit 1.3 beyond `silently_requeue_on_conflict`'s.
+  - Not ported because only legacy or composite resources use them: `CompositeDeletePolicy`,
+    `resource_cluster.go`, `ObservedStatus` accessors, `TypedReference` GVK helpers.
+  - `duration::parse` rejects negative durations; the Go function accepts them and `GetPollInterval`
+    drops them, so the result is the same.
 
 ## Verification
 

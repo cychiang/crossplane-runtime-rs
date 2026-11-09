@@ -1,1 +1,7 @@
 package	test	case	reason
+core/v2	TestConditionedStatusEqual	AIsNil	Go calls Equal on a nil *ConditionedStatus. Every status in the Rust port is a value on its kind, so a nil receiver cannot be built; ConditionedStatus::equal takes two references.
+core/v2	TestConditionedStatusEqual	BIsNil	Same as AIsNil: the nil argument has no Rust counterpart.
+pkg/conditions	TestOGManagerFor	NilObject	Asserts reflect.DeepEqual on the unexported conditionSet struct that Go's Manager factory builds around a nil interface. Rust has no Manager factory (mark_conditions is a free function over &mut M) and no nil object.
+pkg/conditions	TestOGManagerFor	Object	Same mechanism: DeepEqual on the factory's unexported wrapper struct. The behaviour the wrapper exists for, propagating the generation, is covered by TestOGConditionSetMark.
+pkg/event	TestSliceMap	NoValue	Go folds a variadic key/value list and drops an unpaired key. Rust Event::with_annotation and Recorder::with_annotations take (key, value) pairs, so an unpaired key does not compile.
+pkg/event	TestSliceMap	ExtraneousKey	Same as NoValue: the trailing unpaired key cannot be expressed with pair arguments.

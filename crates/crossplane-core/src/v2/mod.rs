@@ -13,6 +13,10 @@ mod policies;
 mod resource;
 pub mod schema;
 
-pub use condition::{Condition, ConditionReason, ConditionStatus, ConditionType, ConditionedStatus};
-pub use policies::{ManagementAction, ManagementPolicies};
+pub use condition::{
+    Condition, ConditionReason, ConditionStatus, ConditionType, ConditionedStatus, is_system_condition_type,
+};
+pub use policies::{
+    DeletionPolicy, ManagementAction, ManagementPolicies, ResolutionPolicy, ResolvePolicy, UpdatePolicy,
+};
 pub use resource::*;

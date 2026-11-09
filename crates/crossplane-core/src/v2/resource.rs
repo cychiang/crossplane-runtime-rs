@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::condition::ConditionedStatus;
-use super::policies::ManagementPolicies;
+use super::policies::{ManagementPolicies, ResolutionPolicy, ResolvePolicy};
 
 pub const LABEL_KEY_PROVIDER_KIND: &str = "crossplane.io/provider-config-kind";
 pub const LABEL_KEY_PROVIDER_NAME: &str = "crossplane.io/provider-config";
@@ -183,3 +183,116 @@ pub struct TypedProviderConfigUsage {
 
 /// Go `managed.ConnectionDetails`. Ordered, so the Secret body is stable in the audit diff.
 pub type ConnectionDetails = BTreeMap<String, Vec<u8>>;
+
+pub const CREDENTIALS_SECRET_ENDPOINT_KEY: &str = "endpoint";
+pub const CREDENTIALS_SECRET_PORT_KEY: &str = "port";
+pub const CREDENTIALS_SECRET_USER_KEY: &str = "username";
+pub const CREDENTIALS_SECRET_PASSWORD_KEY: &str = "password";
+pub const CREDENTIALS_SECRET_CA_KEY: &str = "clusterCA";
+pub const CREDENTIALS_SECRET_CLIENT_CERT_KEY: &str = "clientCert";
+pub const CREDENTIALS_SECRET_CLIENT_KEY_KEY: &str = "clientKey";
+pub const CREDENTIALS_SECRET_TOKEN_KEY: &str = "token";
+pub const CREDENTIALS_SECRET_KUBECONFIG_KEY: &str = "kubeconfig";
+
+/// `xpv2.Policy`: the resolve and resolution policies of a reference or selector.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Policy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve: Option<ResolvePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("default" = "Required"))]
+    pub resolution: Option<ResolutionPolicy>,
+}
+
+impl Policy {
+    pub fn is_resolution_policy_optional(&self) -> bool {
+        self.resolution == Some(ResolutionPolicy::Optional)
+    }
+
+    pub fn is_resolve_policy_always(&self) -> bool {
+        self.resolve == Some(ResolvePolicy::Always)
+    }
+}
+
+/// `xpv2.Reference`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Reference {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Policy>,
+}
+
+/// `xpv2.NamespacedReference`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NamespacedReference {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Policy>,
+}
+
+/// `xpv2.Selector`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Selector {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub match_labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_controller_ref: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Policy>,
+}
+
+/// `xpv2.NamespacedSelector`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NamespacedSelector {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub match_labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_controller_ref: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<Policy>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub namespace: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_wire_form_matches_controller_gen() {
+        let p = Policy {
+            resolve: Some(ResolvePolicy::Always),
+            resolution: Some(ResolutionPolicy::Optional),
+        };
+        assert_eq!(
+            serde_json::json!({"resolve": "Always", "resolution": "Optional"}),
+            serde_json::to_value(&p).unwrap()
+        );
+        assert_eq!(serde_json::json!({}), serde_json::to_value(Policy::default()).unwrap());
+        assert!(p.is_resolve_policy_always() && p.is_resolution_policy_optional());
+
+        let schema = serde_json::to_value(schemars::schema_for!(Policy)).unwrap();
+        assert_eq!(
+            Some("Required"),
+            schema
+                .pointer("/properties/resolution/default")
+                .and_then(|v| v.as_str())
+        );
+    }
+
+    #[test]
+    fn selector_omits_empty_fields() {
+        assert_eq!(
+            serde_json::json!({}),
+            serde_json::to_value(Selector::default()).unwrap()
+        );
+        assert_eq!(
+            serde_json::json!({}),
+            serde_json::to_value(NamespacedSelector::default()).unwrap()
+        );
+    }
+}
