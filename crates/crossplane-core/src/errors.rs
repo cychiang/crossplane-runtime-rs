@@ -161,23 +161,23 @@ pub fn ignore_not_found(result: Result<()>) -> Result<()> {
 mod tests {
     use super::*;
 
-    struct WrapCase {
-        name: &'static str,
-        err: Result<()>,
-        want: Result<()>,
-    }
-
     #[test]
     fn wrap() {
+        struct Case {
+            name: &'static str,
+            err: Result<()>,
+            want: Result<()>,
+        }
+
         let cases = vec![
             // go: pkg/errors TestWrap/NilError
-            WrapCase {
+            Case {
                 name: "NilError",
                 err: Ok(()),
                 want: Ok(()),
             },
             // go: pkg/errors TestWrap/NonNilError
-            WrapCase {
+            Case {
                 name: "NonNilError",
                 err: Err(Error::new("boom")),
                 want: Err(Error::new("very useful context: boom")),
@@ -189,23 +189,23 @@ mod tests {
         }
     }
 
-    struct WrapfCase {
-        name: &'static str,
-        err: Result<()>,
-        want: Result<()>,
-    }
-
     #[test]
     fn wrapf() {
+        struct Case {
+            name: &'static str,
+            err: Result<()>,
+            want: Result<()>,
+        }
+
         let cases = vec![
             // go: pkg/errors TestWrapf/NilError
-            WrapfCase {
+            Case {
                 name: "NilError",
                 err: Ok(()),
                 want: Ok(()),
             },
             // go: pkg/errors TestWrapf/NonNilError
-            WrapfCase {
+            Case {
                 name: "NonNilError",
                 err: Err(Error::new("boom")),
                 want: Err(Error::new("very useful context about ducks: boom")),
@@ -217,29 +217,29 @@ mod tests {
         }
     }
 
-    struct CauseCase {
-        name: &'static str,
-        err: Option<Error>,
-        want: Option<Error>,
-    }
-
     #[test]
     fn cause() {
+        struct Case {
+            name: &'static str,
+            err: Option<Error>,
+            want: Option<Error>,
+        }
+
         let cases = vec![
             // go: pkg/errors TestCause/NilError
-            CauseCase {
+            Case {
                 name: "NilError",
                 err: None,
                 want: None,
             },
             // go: pkg/errors TestCause/BareError
-            CauseCase {
+            Case {
                 name: "BareError",
                 err: Some(Error::new("boom")),
                 want: Some(Error::new("boom")),
             },
             // go: pkg/errors TestCause/WrappedError
-            CauseCase {
+            Case {
                 name: "WrappedError",
                 err: Some(
                     Error::new("boom")
