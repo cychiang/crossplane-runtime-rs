@@ -1,0 +1,33 @@
+# Rendered by scripts/up.sh: @AUDIT_POLICY@ and @AUDIT_DIR@ become absolute
+# host paths, because kind resolves relative hostPaths against its caller's cwd.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+  kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        audit-log-path: /var/log/kubernetes/audit/kube-apiserver-audit.log
+        audit-policy-file: /etc/kubernetes/policies/audit-policy.yaml
+        audit-log-maxsize: "500"
+        audit-log-maxbackup: "1"
+      extraVolumes:
+      - name: audit-policies
+        hostPath: /etc/kubernetes/policies
+        mountPath: /etc/kubernetes/policies
+        readOnly: true
+        pathType: DirectoryOrCreate
+      - name: audit-logs
+        hostPath: /var/log/kubernetes/audit
+        mountPath: /var/log/kubernetes/audit
+        readOnly: false
+        pathType: DirectoryOrCreate
+  extraMounts:
+  - hostPath: @AUDIT_POLICY@
+    containerPath: /etc/kubernetes/policies/audit-policy.yaml
+    readOnly: true
+  - hostPath: @AUDIT_DIR@
+    containerPath: /var/log/kubernetes/audit

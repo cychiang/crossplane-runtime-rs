@@ -1,0 +1,37 @@
+# First matching rule wins.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages: [RequestReceived]
+rules:
+- level: None
+  verbs: [get, list, watch]
+# Provider and Crossplane writes to the kinds the parity diff compares.
+- level: Request
+  userGroups: ["system:serviceaccounts:crossplane-system"]
+  verbs: [create, update, patch, delete, deletecollection]
+  resources:
+  - group: sample.example.com
+  - group: example.com
+  - group: ""
+    resources: [events, secrets]
+  - group: events.k8s.io
+    resources: [events]
+  - group: coordination.k8s.io
+    resources: [leases]
+  - group: protection.crossplane.io
+# Control-plane housekeeping that never involves the provider.
+- level: None
+  users:
+  - system:kube-controller-manager
+  - system:kube-scheduler
+  - system:apiserver
+- level: None
+  userGroups: ["system:nodes", "system:serviceaccounts:kube-system"]
+- level: None
+  resources:
+  - group: coordination.k8s.io
+    resources: [leases]
+# Everything else that writes (chainsaw, Helm, other crossplane-system writes)
+# stays at Metadata as step markers.
+- level: Metadata
+  verbs: [create, update, patch, delete, deletecollection]

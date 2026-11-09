@@ -1,0 +1,83 @@
+# The first three creates fail with 500. The MR reports ReconcileError, then
+# the retry succeeds and it reaches Ready. A fixed fault count keeps the
+# number of failed calls the same for every provider.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: create-failure
+spec:
+  namespace: parity-create-failure
+  bindings:
+  - name: ext
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy
+  steps:
+  - name: inject create faults
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          echo '{"method":"PUT","name":"parity-create-failure","count":3,"status":500}' |
+            kubectl create --raw "$EXT/_faults" -f -
+  - name: failed create reports ReconcileError
+    try:
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-create-failure
+          spec:
+            forProvider:
+              configurableField: after-retry
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-create-failure
+          status:
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcileError
+  - name: retry succeeds
+    try:
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-create-failure
+          status:
+            atProvider:
+              configurableField: after-retry
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          n=$(kubectl get --raw "$EXT/_calls" | grep '"path":"/things/parity-create-failure"' | grep '"method":"PUT"' | grep -c '"status":500')
+          [ "$n" = 3 ] || { echo "want 3 failed PUTs, got $n"; exit 1; }
+  - name: delete
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-create-failure
+    finally:
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: kubectl delete --raw "$EXT/_faults"

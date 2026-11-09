@@ -1,0 +1,133 @@
+# crossplane.io/paused stops reconciliation, so a spec change made while
+# paused reaches the thing only after resuming.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: pause
+spec:
+  namespace: parity-pause
+  bindings:
+  - name: thing
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy/things/parity-pause
+  steps:
+  - name: provider config
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+  - name: create reaches Ready
+    try:
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-pause
+          spec:
+            forProvider:
+              configurableField: before-pause
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-pause
+          status:
+            atProvider:
+              configurableField: before-pause
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+  - name: pause
+    try:
+    - patch:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-pause
+            annotations:
+              crossplane.io/paused: "true"
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-pause
+          status:
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcilePaused
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+  - name: paused resource ignores spec changes
+    try:
+    - patch:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-pause
+          spec:
+            forProvider:
+              configurableField: changed-while-paused
+    - sleep:
+        duration: 15s
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-pause
+          status:
+            atProvider:
+              configurableField: before-pause
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: kubectl get --raw "$THING"
+        check:
+          ($error): ~
+          (json_parse($stdout)):
+            configurableField: before-pause
+  - name: resume catches up
+    try:
+    - patch:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-pause
+            annotations:
+              crossplane.io/paused: null
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-pause
+          status:
+            atProvider:
+              configurableField: changed-while-paused
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: kubectl get --raw "$THING"
+        check:
+          ($error): ~
+          (json_parse($stdout)):
+            configurableField: changed-while-paused
+  - name: delete
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-pause

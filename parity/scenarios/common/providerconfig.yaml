@@ -1,0 +1,20 @@
+# Applied into each test's namespace. The fake service ignores credentials;
+# the Secret exists because the ProviderConfig schema needs a source.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: parity-creds
+type: Opaque
+stringData:
+  credentials: unused
+---
+apiVersion: example.com/v1alpha1
+kind: ProviderConfig
+metadata:
+  name: parity
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      name: parity-creds
+      key: credentials

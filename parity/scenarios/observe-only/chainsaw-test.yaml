@@ -1,0 +1,83 @@
+# managementPolicies [Observe] reads an existing thing into status but never
+# writes or deletes it.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: observe-only
+spec:
+  namespace: parity-observe-only
+  bindings:
+  - name: thing
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy/things/parity-observe-only
+  steps:
+  - name: seed the thing
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: echo '{"configurableField":"seeded"}' | kubectl replace --raw "$THING" -f -
+  - name: observe reaches Ready without writing
+    try:
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-observe-only
+            annotations:
+              crossplane.io/external-name: parity-observe-only
+          spec:
+            managementPolicies: [Observe]
+            forProvider:
+              configurableField: desired-but-ignored
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-observe-only
+          status:
+            atProvider:
+              configurableField: seeded
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+              reason: Available
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: kubectl get --raw "$THING"
+        check:
+          ($error): ~
+          (json_parse($stdout)):
+            configurableField: seeded
+  - name: deleting the MR keeps the thing
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-observe-only
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: kubectl get --raw "$THING"
+        check:
+          ($error): ~
+          (json_parse($stdout)):
+            configurableField: seeded
+    finally:
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: kubectl delete --raw "$THING"
