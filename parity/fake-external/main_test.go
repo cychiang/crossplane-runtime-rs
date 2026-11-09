@@ -78,6 +78,8 @@ func TestThingLifecycle(t *testing.T) {
 	}
 }
 
+const goAgent = "Go-http-client/1.1"
+
 func TestCallLogRecordsThingRequestsInOrder(t *testing.T) {
 	c := newClient(t)
 	c.do(http.MethodGet, "/things/a", "")
@@ -86,9 +88,9 @@ func TestCallLogRecordsThingRequestsInOrder(t *testing.T) {
 	c.do(http.MethodDelete, "/things/a", "")
 
 	want := []Call{
-		{Seq: 1, Method: "GET", Path: "/things/a", Status: 404},
-		{Seq: 2, Method: "PUT", Path: "/things/a", Body: json.RawMessage(`{"configurableField":"x"}`), Status: 201},
-		{Seq: 3, Method: "DELETE", Path: "/things/a", Status: 204},
+		{Seq: 1, Method: "GET", Path: "/things/a", Status: 404, UserAgent: goAgent},
+		{Seq: 2, Method: "PUT", Path: "/things/a", Body: json.RawMessage(`{"configurableField":"x"}`), Status: 201, UserAgent: goAgent},
+		{Seq: 3, Method: "DELETE", Path: "/things/a", Status: 204, UserAgent: goAgent},
 	}
 	if got := c.calls(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("calls:\n got %+v\nwant %+v", got, want)
@@ -127,7 +129,7 @@ func TestFaultsFailTheNextMatchingRequests(t *testing.T) {
 	}
 
 	calls := c.calls()
-	if calls[1].Status != 500 || calls[1].Path != "/things/a" {
+	if calls[1].Status != 500 || calls[1].Path != "/things/a" || !calls[1].Fault || calls[3].Fault {
 		t.Fatalf("failed request is logged with its status: %+v", calls[1])
 	}
 	if _, body := c.do(http.MethodGet, "/_faults", ""); body != "[]" && body != "null" {
@@ -150,5 +152,37 @@ func TestRejectsBadFault(t *testing.T) {
 		if status, _ := c.do(http.MethodPost, "/_faults", body); status != 400 {
 			t.Fatalf("fault %s: got %d, want 400", body, status)
 		}
+	}
+}
+
+func TestCallLogRecordsWhoCalled(t *testing.T) {
+	c := newClient(t)
+	req, _ := http.NewRequest(http.MethodGet, c.url+"/things/a", nil)
+	req.Header.Set("User-Agent", "kubectl/v1.36.0")
+	req.Header.Set("X-Forwarded-For", "172.18.0.2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	got := c.calls()[0]
+	if got.UserAgent != "kubectl/v1.36.0" || got.ForwardedFor != "172.18.0.2" {
+		t.Fatalf("caller not recorded: %+v", got)
+	}
+}
+
+func TestCallLogKeepsAnEmptyUserAgent(t *testing.T) {
+	c := newClient(t)
+	req, _ := http.NewRequest(http.MethodGet, c.url+"/things/a", nil)
+	req.Header.Set("User-Agent", "")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	_, body := c.do(http.MethodGet, "/_calls", "")
+	if !strings.Contains(body, `"userAgent":""`) {
+		t.Fatalf("empty user agent must still be logged: %s", body)
 	}
 }

@@ -18,12 +18,17 @@ type Thing struct {
 }
 
 // Call is one logged request. It has no timestamp so two runs compare equal.
+// UserAgent and ForwardedFor let a differ tell the provider's calls from the
+// scenarios' calls, which arrive through the API server's service proxy.
 type Call struct {
-	Seq    int             `json:"seq"`
-	Method string          `json:"method"`
-	Path   string          `json:"path"`
-	Body   json.RawMessage `json:"body,omitempty"`
-	Status int             `json:"status"`
+	Seq          int             `json:"seq"`
+	Method       string          `json:"method"`
+	Path         string          `json:"path"`
+	Body         json.RawMessage `json:"body,omitempty"`
+	Status       int             `json:"status"`
+	Fault        bool            `json:"fault,omitempty"`
+	UserAgent    string          `json:"userAgent"`
+	ForwardedFor string          `json:"forwardedFor,omitempty"`
 }
 
 // Fault makes the next Count requests matching Method (and Name, when set)
@@ -103,9 +108,12 @@ func (s *Server) serveFaults(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveThing(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/things/")
 	body, _ := io.ReadAll(r.Body)
-	status, resp := s.handleThing(r.Method, name, body)
+	status, resp, fault := s.handleThing(r.Method, name, body)
 
-	c := Call{Seq: len(s.calls) + 1, Method: r.Method, Path: r.URL.Path, Status: status}
+	c := Call{
+		Seq: len(s.calls) + 1, Method: r.Method, Path: r.URL.Path, Status: status, Fault: fault,
+		UserAgent: r.UserAgent(), ForwardedFor: r.Header.Get("X-Forwarded-For"),
+	}
 	if compact := new(bytes.Buffer); len(body) > 0 && json.Compact(compact, body) == nil {
 		c.Body = compact.Bytes()
 	}
@@ -118,13 +126,18 @@ func (s *Server) serveThing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, resp)
 }
 
-func (s *Server) handleThing(method, name string, body []byte) (int, any) {
+func (s *Server) handleThing(method, name string, body []byte) (int, any, bool) {
 	if name == "" || strings.Contains(name, "/") {
-		return http.StatusNotFound, nil
+		return http.StatusNotFound, nil, false
 	}
 	if status, ok := s.takeFault(method, name); ok {
-		return status, map[string]string{"error": "injected fault"}
+		return status, map[string]string{"error": "injected fault"}, true
 	}
+	status, resp := s.thing(method, name, body)
+	return status, resp, false
+}
+
+func (s *Server) thing(method, name string, body []byte) (int, any) {
 	switch method {
 	case http.MethodGet:
 		t, ok := s.things[name]
