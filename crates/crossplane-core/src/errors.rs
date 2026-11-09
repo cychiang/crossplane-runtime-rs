@@ -53,6 +53,14 @@ impl Error {
         }))
     }
 
+    /// Go `errors.Cause`: the first error in the chain that is not a wrap.
+    pub fn cause(&self) -> &Error {
+        match &*self.0 {
+            Repr::Wrapped { cause, .. } => cause.cause(),
+            _ => self,
+        }
+    }
+
     /// An API server refusal. Built by `Client` implementations and by tests.
     pub fn status(reason: StatusReason, message: impl Into<String>) -> Self {
         Self(Arc::new(Repr::Status {
@@ -146,5 +154,104 @@ pub fn ignore_not_found(result: Result<()>) -> Result<()> {
     match result {
         Err(err) if err.is_not_found() => Ok(()),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct WrapCase {
+        name: &'static str,
+        err: Result<()>,
+        want: Result<()>,
+    }
+
+    #[test]
+    fn wrap() {
+        let cases = vec![
+            // go: pkg/errors TestWrap/NilError
+            WrapCase {
+                name: "NilError",
+                err: Ok(()),
+                want: Ok(()),
+            },
+            // go: pkg/errors TestWrap/NonNilError
+            WrapCase {
+                name: "NonNilError",
+                err: Err(Error::new("boom")),
+                want: Err(Error::new("very useful context: boom")),
+            },
+        ];
+        for tc in cases {
+            let got = tc.err.wrap_err("very useful context");
+            assert_eq!(tc.want, got, "{}: wrap_err", tc.name);
+        }
+    }
+
+    struct WrapfCase {
+        name: &'static str,
+        err: Result<()>,
+        want: Result<()>,
+    }
+
+    #[test]
+    fn wrapf() {
+        let cases = vec![
+            // go: pkg/errors TestWrapf/NilError
+            WrapfCase {
+                name: "NilError",
+                err: Ok(()),
+                want: Ok(()),
+            },
+            // go: pkg/errors TestWrapf/NonNilError
+            WrapfCase {
+                name: "NonNilError",
+                err: Err(Error::new("boom")),
+                want: Err(Error::new("very useful context about ducks: boom")),
+            },
+        ];
+        for tc in cases {
+            let got = tc.err.wrap_err(&format!("very useful context about {}", "ducks"));
+            assert_eq!(tc.want, got, "{}: wrap_err with a formatted message", tc.name);
+        }
+    }
+
+    struct CauseCase {
+        name: &'static str,
+        err: Option<Error>,
+        want: Option<Error>,
+    }
+
+    #[test]
+    fn cause() {
+        let cases = vec![
+            // go: pkg/errors TestCause/NilError
+            CauseCase {
+                name: "NilError",
+                err: None,
+                want: None,
+            },
+            // go: pkg/errors TestCause/BareError
+            CauseCase {
+                name: "BareError",
+                err: Some(Error::new("boom")),
+                want: Some(Error::new("boom")),
+            },
+            // go: pkg/errors TestCause/WrappedError
+            CauseCase {
+                name: "WrappedError",
+                err: Some(
+                    Error::new("boom")
+                        .wrap("interstitial context")
+                        .wrap("very important context"),
+                ),
+                want: Some(Error::new("boom")),
+            },
+        ];
+        for tc in cases {
+            let got = tc.err.as_ref().map(Error::cause);
+            assert_eq!(tc.want.as_ref(), got, "{}: cause", tc.name);
+        }
     }
 }

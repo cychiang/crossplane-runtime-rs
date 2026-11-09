@@ -41,3 +41,47 @@ pub fn silently_requeue_on_conflict(result: Result<Outcome>) -> Result<Outcome> 
         other => other,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crossplane_core::errors::Error;
+
+    use super::*;
+
+    struct Case {
+        reason: &'static str,
+        result: Result<Outcome>,
+        want: Result<Outcome>,
+    }
+
+    // go: pkg/errors TestSilentlyRequeueOnConflict
+    #[test]
+    fn silently_requeue_on_conflict_cases() {
+        let after = Outcome::RequeueAfter(Duration::from_secs(1));
+        let cases = vec![
+            Case {
+                reason: "nil error",
+                result: Ok(after),
+                want: Ok(after),
+            },
+            Case {
+                reason: "other error",
+                result: Err(Error::new("some other error")),
+                want: Err(Error::new("some other error")),
+            },
+            Case {
+                reason: "conflict error",
+                result: Err(Error::conflict()),
+                want: Ok(Outcome::Requeue),
+            },
+            Case {
+                reason: "nested conflict error",
+                result: Err(Error::conflict().wrap("outer error")),
+                want: Ok(Outcome::Requeue),
+            },
+        ];
+        for tc in cases {
+            assert_eq!(tc.want, silently_requeue_on_conflict(tc.result), "{}", tc.reason);
+        }
+    }
+}
