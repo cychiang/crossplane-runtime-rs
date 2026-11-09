@@ -8,7 +8,7 @@ use crate::client::Client;
 use crate::errors::Result;
 use crate::v2::{
     Condition, ConditionType, ConditionedStatus, LocalSecretReference, ManagedResourceSpec, ManagedResourceStatus,
-    ManagementPolicies, ProviderConfigReference, ProviderConfigStatus, TypedProviderConfigUsage,
+    ManagementPolicies, ProviderConfigReference, ProviderConfigStatus, TypedProviderConfigUsage, TypedReference,
 };
 
 /// Go `resource.ModernManaged`. The four required accessors say where the kind keeps the two
@@ -43,6 +43,18 @@ pub trait Managed: Kind + Resource<Scope = NamespaceResourceScope> {
         &self.managed_spec().management_policies
     }
 
+    fn set_provider_config_reference(&mut self, r: Option<ProviderConfigReference>) {
+        self.managed_spec_mut().provider_config_ref = r;
+    }
+
+    fn set_write_connection_secret_to_reference(&mut self, r: Option<LocalSecretReference>) {
+        self.managed_spec_mut().write_connection_secret_to_ref = r;
+    }
+
+    fn set_management_policies(&mut self, p: ManagementPolicies) {
+        self.managed_spec_mut().management_policies = p;
+    }
+
     fn get_condition(&self, ct: &ConditionType) -> Condition {
         match self.managed_status() {
             Some(status) => status.conditioned.get_condition(ct),
@@ -67,6 +79,25 @@ pub fn mark_conditions<M: Managed>(mg: &mut M, conditions: impl IntoIterator<Ite
 pub trait ProviderConfig: Kind {
     fn provider_config_status(&self) -> Option<&ProviderConfigStatus>;
     fn provider_config_status_mut(&mut self) -> &mut ProviderConfigStatus;
+
+    fn users(&self) -> i64 {
+        self.provider_config_status().map_or(0, |s| s.users)
+    }
+
+    fn set_users(&mut self, users: i64) {
+        self.provider_config_status_mut().users = users;
+    }
+
+    fn get_condition(&self, ct: &ConditionType) -> Condition {
+        match self.provider_config_status() {
+            Some(status) => status.conditioned.get_condition(ct),
+            None => ConditionedStatus::default().get_condition(ct),
+        }
+    }
+
+    fn set_conditions(&mut self, conditions: impl IntoIterator<Item = Condition>) {
+        self.provider_config_status_mut().conditioned.set_conditions(conditions);
+    }
 }
 
 /// Go `resource.TypedProviderConfigUsage`.
@@ -76,4 +107,20 @@ pub trait ProviderConfigUsage: Kind {
     fn from_usage(metadata: ObjectMeta, usage: TypedProviderConfigUsage) -> Self;
     fn usage(&self) -> &TypedProviderConfigUsage;
     fn usage_mut(&mut self) -> &mut TypedProviderConfigUsage;
+
+    fn provider_config_reference(&self) -> &ProviderConfigReference {
+        &self.usage().provider_config_ref
+    }
+
+    fn set_provider_config_reference(&mut self, r: ProviderConfigReference) {
+        self.usage_mut().provider_config_ref = r;
+    }
+
+    fn resource_reference(&self) -> &TypedReference {
+        &self.usage().resource_ref
+    }
+
+    fn set_resource_reference(&mut self, r: TypedReference) {
+        self.usage_mut().resource_ref = r;
+    }
 }
