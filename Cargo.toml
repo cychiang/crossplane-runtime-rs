@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/crossplane-core",
+    "crates/crossplane-derive",
+    "crates/crossplane-test",
+    "crates/crossplane-runtime",
+    "examples/provider-sample",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+crossplane-core = { path = "crates/crossplane-core" }
+crossplane-derive = { path = "crates/crossplane-derive" }
+crossplane-test = { path = "crates/crossplane-test" }
+crossplane-runtime = { path = "crates/crossplane-runtime" }
+
+kube = { version = "=5.0.0", default-features = false }
+k8s-openapi = { version = "=0.29.0", features = ["v1_36", "schemars"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+tokio-util = "0.7.20"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+prometheus = { version = "0.14", default-features = false }
+clap = { version = "4.6", features = ["derive", "env"] }
+anyhow = "1"
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# The `*Fn` table adapters hold one boxed closure each, as Go's func types do. An alias per
+# adapter would name the same type twice.
+type_complexity = "allow"
