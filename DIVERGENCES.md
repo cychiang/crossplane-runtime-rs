@@ -51,18 +51,18 @@ sink (a strategic merge patch of a repeated event, as client-go's), in
   which also reads a `--kubeconfig` flag registered on Go's `flag` set. The baseline parses its
   flags with kingpin, so whether that flag is ever parsed is not known. Running the baseline
   binary with `--kubeconfig` would settle it.
-- **A reconcile cycle runs longer.** Over the 1, 2, 4, 8 and 16s backoff that holds a deleted MR
-  inside the creation grace period, the Rust provider's `PendingExternalResource` event writes
-  came 7.8, 3.0, 4.2, 6.2 and 19.7ms later than the delay, the Go provider's 3.9, 1.2, 0.9, 0.6 and 0.8ms
-  (`parity-poll-interval` in runs rust-4 and go-h, from `audit-raw.jsonl`). Each interval is the
-  backoff plus one whole reconcile, since the requeue is added when the reconcile returns. The
-  queue half was checked: it sleeps with `tokio::time::sleep_until` on the exact deadline and
-  the backoff arithmetic matches client-go. The reconcile half (connector reads, client setup,
-  event writes) was not timed, so the cause is not known. No compared layer shows it, but it moved Rust's last
-  ProviderConfig writes about 35ms later at the end of a test, into the cleanup race that the
-  2s `delayBeforeCleanup` in `parity/scenarios/chainsaw.yaml` now removes (rust-5 and rust-6).
-  One candidate was tested and not confirmed: the template built a new HTTP connection pool on
-  every connect, where Go reuses `http.DefaultTransport`. With one shared pool (template commit
-  "Share one HTTP connection pool across connects"), run rust-pool-1 measured 1, 2 and 4ms over
-  the 2, 4 and 8s backoffs, against rust-7's 3, 3 and 4ms and go-k's 1, 1 and 1ms. Three samples
-  per run cannot separate that from noise. Timing the reconcile itself would settle it.
+- **A reconcile cycle runs slightly longer (mostly fixed).** The provider removes an MR's
+  finalizer after the 30s creation grace period, at the end of a chain of rate-limited requeues,
+  so the delay from the scenario's delete to that update sums every requeue's reconcile time
+  (`parity/scripts/finalizer-lag.py`). Medians: Go 31012 to 31013ms (go-h to go-l); Rust 31046
+  to 31057ms (rust-5 to rust-8, minimum 31040); Rust with one shared HTTP connection pool
+  31018ms (rust-pool-1, all 10 samples 31015 to 31029). The template had built a new pool on
+  every connect, so every reconcile opened a new connection to the external service; Go's
+  `http.Client` reuses `http.DefaultTransport`. Why a new connection cost several ms (DNS
+  search-path lookups, TCP connect) was inferred, not measured. About 6ms of excess over the
+  chain remains unexplained. The excess lag had pushed Rust's last ProviderConfig writes into
+  the cleanup window: before the 2s `delayBeforeCleanup`, the gap from the last ProviderConfig
+  write to cleanup's delete was at least 31ms on Go (go-h to go-j) and as little as 0 to 1ms on
+  Rust (rust-4 to rust-6), which had ProviderConfig 409s in five tests against one in go-h
+  (`parity/scripts/pc-settle.py` and the audit). The single event intervals once used here
+  (1 to 20ms) were too few samples to show the change.
