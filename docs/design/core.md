@@ -314,7 +314,12 @@ Units 1.7 and 1.8 (ProviderConfig reconciler, safe-start gate):
   `o.gate.clone()` and `controller::Options` is unchanged.
 - `TransformStripCRDSchema` is `customresourcesgate::transform_strip_crd_schema(&mut dyn Object)`.
   It mutates in place and ignores any kind but a CRD, where Go returns the object. Nothing calls
-  it yet: the informer cache (1.9) has no transform hook, and the baseline does not install it.
+  it, by decision at integration: Go's `Setup` installs no transform (`setup.go` only builds the
+  controller) and the baseline's `cache.Options` sets only `SyncPeriod`
+  (`cmd/provider/main.go:95-97`), so the baseline caches whole CRDs. Wiring a transform hook
+  into the cache would change only memory use, never a request, and would make the Rust cache
+  differ from the baseline's. A provider cannot install it either, since the cache has no public
+  options; add a per-kind transform hook when a provider needs one.
 - Gate callbacks run on `spawn_blocking` when a tokio runtime is current and on a new thread
   otherwise, because a callback typically registers controllers and the caller of `register` or
   `set` may be either.
