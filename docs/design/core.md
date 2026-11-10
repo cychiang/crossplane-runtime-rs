@@ -397,7 +397,9 @@ Unit 1.6 (managed reconciler):
   to bytes protoc produced from the Go repository's `.proto`. `ChangeLogServiceClient` is the
   seam Go's generated client interface gives. `UnixChangeLogClient` dials lazily and redials
   every 100ms while the socket is unreachable, which stands in for `grpc.WaitForReady(true)`;
-  the logger's send timeout bounds it. An error the sidecar sends is returned at once.
+  the logger's send timeout bounds it. Only a failed dial is redialed. An error the sidecar
+  sends, or a connection lost while the call is in flight, is returned at once, so an entry is
+  never sent twice.
   `ChangeLogEntry.snapshot` is a JSON object, not any JSON value.
 - Go returns `AdditionalDetails` beside an error from Create, Update and Delete and logs them.
   A Rust `Result` carries one or the other, so a failed operation's entry has no details.

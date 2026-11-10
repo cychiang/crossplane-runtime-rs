@@ -506,3 +506,50 @@ async fn an_error_from_the_sidecar_is_not_retried() {
     assert_eq!(1, sidecar.requests.lock().unwrap().len());
     let _ = std::fs::remove_file(socket);
 }
+
+/// A connection that drops while the call is in flight is not a sidecar that cannot be reached:
+/// the entry may have arrived, so sending it again could record the change twice.
+#[tokio::test]
+async fn a_call_lost_in_flight_is_not_sent_again() {
+    use tokio::io::AsyncReadExt;
+
+    let socket = socket_path();
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind the socket");
+    let connections = Arc::new(AtomicUsize::new(0));
+    tokio::spawn({
+        let connections = connections.clone();
+        async move {
+            // Accept, read the start of the request, hang up.
+            while let Ok((mut stream, _)) = listener.accept().await {
+                connections.fetch_add(1, Ordering::Relaxed);
+                let _ = stream.read(&mut [0u8; 4096]).await;
+            }
+        }
+    });
+
+    let logger = GrpcChangeLogger::new(UnixChangeLogClient::new(&socket)).send_timeout(Duration::from_secs(2));
+    let got = logger.log(sample_entry()).await;
+    let want = Err(Error::new("rpc error: code = Unknown desc = transport error").wrap("cannot send change log entry"));
+    test::assert_result("lost", "The sidecar hangs up mid-call.", &want, &got);
+    assert_eq!(1, connections.load(Ordering::Relaxed));
+    let _ = std::fs::remove_file(socket);
+}
+
+/// Nor is an `Unavailable` that the sidecar itself answered with.
+#[tokio::test]
+async fn unavailable_from_the_sidecar_is_not_retried() {
+    let socket = socket_path();
+    let sidecar = sidecar::Sidecar {
+        fail: Some((tonic::Code::Unavailable, "busy")),
+        ..Default::default()
+    };
+    sidecar.serve(&socket);
+
+    let got = GrpcChangeLogger::new(UnixChangeLogClient::new(&socket))
+        .log(sample_entry())
+        .await;
+    let want = Err(Error::new("rpc error: code = Unavailable desc = busy").wrap("cannot send change log entry"));
+    test::assert_result("busy", "The sidecar answers Unavailable.", &want, &got);
+    assert_eq!(1, sidecar.requests.lock().unwrap().len());
+    let _ = std::fs::remove_file(socket);
+}

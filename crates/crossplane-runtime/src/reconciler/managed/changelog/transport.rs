@@ -62,9 +62,13 @@ impl ChangeLogServiceClient for UnixChangeLogClient {
     }
 }
 
-/// A status tonic made from a failure to connect, as opposed to one the server sent.
+/// A status tonic made from a failure to dial the socket. tonic reports that as `Unavailable`
+/// with a transport error as its source. A connection lost while the call was in flight is
+/// `Unknown` with a transport source, and an `Unavailable` the sidecar sent has no transport
+/// source; neither is resent, because the sidecar may already have the entry.
 fn not_ready(status: &tonic::Status) -> bool {
-    std::error::Error::source(status).is_some_and(|e| e.is::<tonic::transport::Error>())
+    status.code() == tonic::Code::Unavailable
+        && std::error::Error::source(status).is_some_and(|e| e.is::<tonic::transport::Error>())
 }
 
 /// Go's `status.Error` text.
