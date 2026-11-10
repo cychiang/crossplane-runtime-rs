@@ -158,17 +158,19 @@ is covered by `pause`. The `crossplane.io/reconcile-requested-at` annotation is 
 Faults match by method and name, so a PUT fault injected after the thing exists fails only the update. A scenario
 never reads a thing through the proxy while a GET fault is pending on it, because that read would consume the fault.
 
-Chainsaw waits 2s after a test before cleanup (`delayBeforeCleanup` in `scenarios/chainsaw.yaml`). Without it the
-trace ended while the ProviderConfig controller was still busy. Once an MR is gone, its usage goes too and the
-ProviderConfig is reconciled twice within about 15ms: one round writes `users: 0`, and the status change triggers a
-second round that writes the same again. Cleanup deleted the ProviderConfig 0 to 200ms after the MR was gone. When the
-delete landed inside the second round, that round's update or status write failed with 409 and its other write was
-never sent (spec 4.1 PC7 and PC8). Failed writes are not compared, so one run then had a write fewer. In rust-5 this
-happened in `pause` and `default-providerconfig-ref`: the gap from the provider's last ProviderConfig write to the
-delete was 1 and 2ms. For the same tests in go-e to go-j it was 31 to 36ms, except 10ms for
-`default-providerconfig-ref` in go-f, so Go came close too. Go's own ProviderConfig 409s follow the
-same code path: in go-f, go-g and go-h the reconcile that got the 409 wrote no status, and a reconcile 1ms later wrote
-the identical pair, which the collapse rule then merged.
+Cleanup starts as soon as a test ends, with no delay. Once an MR is gone, its usage goes too and the ProviderConfig is
+reconciled twice within about 15ms: one round writes `users: 0`, and the status change triggers a second round that
+writes the same again. Cleanup then deletes the ProviderConfig. When the delete lands inside the second round, that
+round's update or status write fails with 409 and its other write is never sent (spec 4.1 PC7 and PC8). Failed writes
+are not compared, so that run has a write fewer. `scripts/pc-settle.py <run>` prints, per run, the smallest gap from
+the provider's last ProviderConfig write to the delete, and the tests with a ProviderConfig 409.
+
+The race is possible on both stacks, and its odds follow the provider's reconcile latency. Go's smallest gap is 31 to
+33ms (go-h to go-j). A Rust provider that opened a new HTTP connection on every reconcile finished the 30s
+grace-period chain about 40ms later than Go (`scripts/finalizer-lag.py`), its gap fell to 0 to 1ms, and 2 of 3 runs
+differed. A 2s `delayBeforeCleanup` covered that until the cause was fixed. With one shared connection pool the
+Rust gap is 12 to 29ms, and runs rust-nodelay-1 to 3 are each equal to go-h, go-i and go-j. If a run ever differs by
+one missing ProviderConfig write after a 409, rerun it and check `pc-settle.py`.
 
 Each test runs in its own fixed namespace with its own Secret and namespaced ProviderConfig. Each manifest except
 `default-providerconfig-ref` sets `providerConfigRef.kind: ProviderConfig`, because the CRD default

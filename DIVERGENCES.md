@@ -61,8 +61,10 @@ sink (a strategic merge patch of a repeated event, as client-go's), in
   `http.Client` reuses `http.DefaultTransport`. Why a new connection cost several ms (DNS
   search-path lookups, TCP connect) was inferred, not measured. About 6ms of excess over the
   chain remains unexplained. The excess lag had pushed Rust's last ProviderConfig writes into
-  the cleanup window: before the 2s `delayBeforeCleanup`, the gap from the last ProviderConfig
+  the cleanup window: without a cleanup delay, the gap from the last ProviderConfig
   write to cleanup's delete was at least 31ms on Go (go-h to go-j) and as little as 0 to 1ms on
   Rust (rust-4 to rust-6), which had ProviderConfig 409s in five tests against one in go-h
   (`parity/scripts/pc-settle.py` and the audit). The single event intervals once used here
   (1 to 20ms) were too few samples to show the change.
+  With the shared pool and no cleanup delay, rust-nodelay-1 to 3 are each equal to go-h, go-i and
+  go-j (9 of 9), with a smallest gap of 12 to 29ms, so the scenarios run without the delay.
