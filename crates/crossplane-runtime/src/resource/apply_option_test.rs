@@ -213,7 +213,7 @@ fn allow_update_if() {
             want: Some(new_not_allowed("update not allowed")),
         },
     ];
-    for mut tc in cases {
+    for tc in cases {
         let allowed = tc.allowed;
         let got = ApplyOption::AllowUpdateIf(Box::new(move |_, _| allowed))
             .run(&mut fake::Object::default(), &fake::Object::default());

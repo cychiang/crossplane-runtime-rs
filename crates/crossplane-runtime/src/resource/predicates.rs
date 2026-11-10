@@ -42,3 +42,7 @@ impl Predicate for DesiredStateChanged {
             )
     }
 }
+
+#[cfg(test)]
+#[path = "predicates_test.rs"]
+mod tests;

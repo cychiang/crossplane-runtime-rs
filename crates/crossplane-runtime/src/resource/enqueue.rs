@@ -41,3 +41,7 @@ impl<U: ProviderConfigUsage> EventHandler<U> for EnqueueRequestForProviderConfig
         usages.into_iter().filter_map(|u| self.request_for(u)).collect()
     }
 }
+
+#[cfg(test)]
+#[path = "enqueue_test.rs"]
+mod tests;

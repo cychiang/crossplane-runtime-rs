@@ -87,3 +87,7 @@ impl<K: Send + 'static> Finalizer<K> for FinalizerFns<K> {
         futures::future::ready(f(obj)).boxed()
     }
 }
+
+#[cfg(test)]
+#[path = "finalizer_test.rs"]
+mod tests;

@@ -25,3 +25,7 @@ impl LateInitializer {
         self.changed
     }
 }
+
+#[cfg(test)]
+#[path = "late_init_test.rs"]
+mod tests;
