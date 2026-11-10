@@ -49,8 +49,9 @@ func (e *External) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	cr.Status.AtProvider.ConfigurableField = t.ConfigurableField
 	cr.Status.SetConditions(xpv2.Available())
 	return managed.ExternalObservation{
-		ResourceExists:   true,
-		ResourceUpToDate: t.ConfigurableField == cr.Spec.ForProvider.ConfigurableField,
+		ResourceExists:    true,
+		ResourceUpToDate:  t.ConfigurableField == cr.Spec.ForProvider.ConfigurableField,
+		ConnectionDetails: managed.ConnectionDetails{"configurableField": []byte(t.ConfigurableField)},
 	}, nil
 }
 

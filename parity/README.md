@@ -73,12 +73,14 @@ because the thing name ignores the namespace.
 
 | Method | Call | Then |
 |---|---|---|
-| Observe | `GET /things/{name}`, including while the MR is being deleted | 404 returns `ResourceExists: false`. 200 sets `status.atProvider.configurableField` to the thing's value, sets `Available`, and returns `ResourceExists: true` with `ResourceUpToDate` set to whether the value equals the spec |
+| Observe | `GET /things/{name}`, including while the MR is being deleted | 404 returns `ResourceExists: false`. 200 sets `status.atProvider.configurableField` to the thing's value, sets `Available`, and returns `ResourceExists: true` with `ResourceUpToDate` set to whether the value equals the spec, and the connection detail `configurableField` set to the value |
 | Create | `PUT` | Sets `Creating` before the call. On success sets `status.atProvider.configurableField` from the response |
 | Update | `PUT` | On success sets `status.atProvider.configurableField` from the response |
 | Delete | `DELETE` | Sets `Deleting` before the call. 204 and 404 both succeed |
 
-No connection details are returned. A status code the table does not expect becomes the error
+Observe returns one connection detail, `configurableField`, holding the thing's value. Create, Update
+and Delete return none. The runtime publishes it to the Secret named by `spec.writeConnectionSecretToRef`
+when that is set. A status code the table does not expect becomes the error
 `<METHOD> /things/<name>: status <code>`. Example: `PUT /things/a: status 500`. The runtime wraps
 it, so a failed create shows `create failed: PUT /things/a: status 500` on the Synced condition.
 

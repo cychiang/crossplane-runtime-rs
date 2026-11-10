@@ -44,11 +44,17 @@ impl ExternalClient<MyType> for External {
             return Ok(ExternalObservation::default());
         };
         let up_to_date = thing.configurable_field == cr.spec.for_provider.configurable_field;
+        let connection_details = [(
+            "configurableField".to_owned(),
+            thing.configurable_field.clone().into_bytes(),
+        )]
+        .into();
         cr.status.get_or_insert_default().at_provider.configurable_field = thing.configurable_field;
         cr.set_conditions([Condition::available()]);
         Ok(ExternalObservation {
             resource_exists: true,
             resource_up_to_date: up_to_date,
+            connection_details,
             ..Default::default()
         })
     }
