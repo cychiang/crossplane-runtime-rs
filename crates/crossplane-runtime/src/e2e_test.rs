@@ -350,6 +350,8 @@ async fn a_managed_resource_lives_through_the_assembled_runtime() {
         // (`reconciler.go:1218`, checked before the deletion branch at :1231), as it does here.
         .creation_grace_period(CREATION_GRACE)
         .recorder(mgr.event_recorder_for(&name))
+        // The baseline's `--enable-management-policies` defaults to true (`cmd/provider/main.go:67`).
+        .management_policies()
         .build();
     controller::new_managed_by(&mgr)
         .named(&name)

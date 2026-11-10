@@ -474,7 +474,7 @@ Integration (the merged units run together):
   `reconciler/deadline.rs`; `Deadlines`, the managed reconciler's two-context pair, stays there.
 - `e2e_test.rs` runs the units together against a live cluster: a Manager, a managed controller
   wired as `wiring.rs` wires one (rate-limited reconciler, `desired_state_changed`, the API
-  recorder), a per-process `xprs-e2e-<pid>.example.com` CRD it installs and removes, and an
+  recorder, management policies on as the baseline's flag defaults), a per-process `xprs-e2e-<pid>.example.com` CRD it installs and removes, and an
   in-memory external system. It asserts through an uncached client: finalizer, external-name
   and create annotations, `Synced`/`Ready` with Go's reasons, core/v1 Events with Go's reasons,
   messages and source component, a spec change reaching external update, the pause annotation
