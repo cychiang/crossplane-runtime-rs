@@ -58,6 +58,7 @@ pub use self::metrics::{MetricRecorder, MetricSubject, MrMetricRecorder, NopMetr
 use self::policy::{ActionSet, PolicyResolver, default_supported_management_policies};
 use crate::clock::{Clock, SystemClock};
 use crate::event::{Event, NopRecorder, Recorder};
+use crate::reconciler::deadline::bounded;
 use crate::reconciler::{Outcome, Reconcile, Request, silently_requeue_on_conflict};
 use crate::resource::{ApiFinalizer, Finalizer};
 
@@ -363,19 +364,6 @@ impl<M: Managed> ReconcilerBuilder<M> {
 struct Deadlines {
     external: Instant,
     kubernetes: Instant,
-}
-
-/// A call under a Go context with a deadline: it fails with `context deadline exceeded` when the
-/// deadline has passed or passes while it runs, and the reconcile carries on to the branch that
-/// handles the error.
-async fn bounded<T>(deadline: Instant, call: impl Future<Output = Result<T>>) -> Result<T> {
-    if Instant::now() >= deadline {
-        return Err(Error::deadline_exceeded());
-    }
-    match tokio::time::timeout_at(deadline, call).await {
-        Ok(result) => result,
-        Err(_) => Err(Error::deadline_exceeded()),
-    }
 }
 
 impl<M: Managed> Reconcile for Reconciler<M> {

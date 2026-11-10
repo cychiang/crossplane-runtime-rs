@@ -521,33 +521,90 @@ async fn a_failed_put_emits_no_event() {
     assert!(recorder.events.lock().unwrap().is_empty());
 }
 
-#[tokio::test(start_paused = true)]
-async fn the_whole_reconcile_ends_at_two_minutes() {
-    struct Hangs;
-    impl Client for Hangs {
-        fn get<'a>(&'a self, _: &'a ObjectType, _: &'a ObjectKey) -> BoxFuture<'a, Result<Box<dyn Object>>> {
-            futures::future::pending().boxed()
+/// A `MockClient` whose `get` and `list` first wait, so a test on tokio's paused clock can put a
+/// call past the reconcile's deadline.
+struct Slow {
+    inner: MockClient,
+    get: Duration,
+    list: Duration,
+}
+
+impl Client for Slow {
+    fn get<'a>(&'a self, t: &'a ObjectType, key: &'a ObjectKey) -> BoxFuture<'a, Result<Box<dyn Object>>> {
+        async move {
+            tokio::time::sleep(self.get).await;
+            self.inner.get(t, key).await
         }
-        fn list<'a>(&'a self, _: &'a ObjectType, _: &'a ListOptions) -> BoxFuture<'a, Result<Vec<Box<dyn Object>>>> {
-            unreachable!()
-        }
-        fn create<'a>(&'a self, _: &'a mut dyn Object) -> BoxFuture<'a, Result<()>> {
-            unreachable!()
-        }
-        fn update<'a>(&'a self, _: &'a mut dyn Object) -> BoxFuture<'a, Result<()>> {
-            unreachable!()
-        }
-        fn update_status<'a>(&'a self, _: &'a mut dyn Object) -> BoxFuture<'a, Result<()>> {
-            unreachable!()
-        }
-        fn patch<'a>(&'a self, _: &'a mut dyn Object, _: crossplane_core::client::Patch) -> BoxFuture<'a, Result<()>> {
-            unreachable!()
-        }
-        fn delete<'a>(&'a self, _: &'a dyn Object) -> BoxFuture<'a, Result<()>> {
-            unreachable!()
-        }
+        .boxed()
     }
-    let r = Reconciler::<ProviderConfig, ProviderConfigUsage>::builder(Arc::new(Hangs)).build();
-    let err = r.reconcile(&ObjectKey::cluster("x")).await.unwrap_err();
-    assert_eq!(err, Error::deadline_exceeded());
+    fn list<'a>(&'a self, t: &'a ObjectType, o: &'a ListOptions) -> BoxFuture<'a, Result<Vec<Box<dyn Object>>>> {
+        async move {
+            tokio::time::sleep(self.list).await;
+            self.inner.list(t, o).await
+        }
+        .boxed()
+    }
+    fn create<'a>(&'a self, obj: &'a mut dyn Object) -> BoxFuture<'a, Result<()>> {
+        self.inner.create(obj)
+    }
+    fn update<'a>(&'a self, obj: &'a mut dyn Object) -> BoxFuture<'a, Result<()>> {
+        self.inner.update(obj)
+    }
+    fn update_status<'a>(&'a self, obj: &'a mut dyn Object) -> BoxFuture<'a, Result<()>> {
+        self.inner.update_status(obj)
+    }
+    fn patch<'a>(&'a self, obj: &'a mut dyn Object, p: crossplane_core::client::Patch) -> BoxFuture<'a, Result<()>> {
+        self.inner.patch(obj, p)
+    }
+    fn delete<'a>(&'a self, obj: &'a dyn Object) -> BoxFuture<'a, Result<()>> {
+        self.inner.delete(obj)
+    }
+}
+
+fn slow(inner: MockClient, get: Duration, list: Duration) -> Arc<Slow> {
+    Arc::new(Slow { inner, get, list })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_get_past_the_deadline_fails_wrapped_as_go_returns_it() {
+    let c = MockClient {
+        get: Some(new_mock_get_fn(|| pc_named(None))),
+        ..Default::default()
+    };
+    let r = Reconciler::<ProviderConfig, ProviderConfigUsage>::builder(slow(c, TIMEOUT * 2, Duration::ZERO)).build();
+    let got = r.reconcile(&ObjectKey::cluster("my-pc")).await;
+    assert_result(
+        "GetPastDeadline",
+        "Go's Get fails on the expired context and is wrapped with errGetPC",
+        &Err(Error::deadline_exceeded().wrap(ERR_GET_PC)),
+        &got,
+    );
+}
+
+/// Go bounds the run with one context. A List that outlives it fails on that context and the
+/// reconcile carries on into the List branch: a warning event and a short wait, not an error.
+#[tokio::test(start_paused = true)]
+async fn a_hung_list_takes_the_list_failure_branch_at_the_deadline() {
+    let recorder = RecordingRecorder::default();
+    let c = MockClient {
+        get: Some(new_mock_get_fn(|| pc_named(None))),
+        list: Some(new_mock_list_fn(Vec::<ProviderConfigUsage>::new)),
+        ..Default::default()
+    };
+    let r = Reconciler::<ProviderConfig, ProviderConfigUsage>::builder(slow(c, Duration::ZERO, Duration::MAX))
+        .recorder(Arc::new(recorder.clone()))
+        .build();
+    let got = r.reconcile(&ObjectKey::cluster("my-pc")).await;
+    assert_result(
+        "ListPastDeadline",
+        "the List branch's result",
+        &Ok(Outcome::RequeueAfter(SHORT_WAIT)),
+        &got,
+    );
+    let events = recorder.events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].1.message,
+        "cannot list ProviderConfigUsages: context deadline exceeded"
+    );
 }

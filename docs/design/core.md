@@ -318,8 +318,8 @@ Units 1.7 and 1.8 (ProviderConfig reconciler, safe-start gate):
 - Gate callbacks run on `spawn_blocking` when a tokio runtime is current and on a new thread
   otherwise, because a callback typically registers controllers and the caller of `register` or
   `set` may be either.
-- The ProviderConfig reconciler ends the whole run at `TIMEOUT` with a deadline error, the same
-  open point as the managed reconciler (see its note). The legacy usage kind probe
+- The ProviderConfig reconciler ended the whole run at `TIMEOUT`. Fixed at integration: each
+  call is bounded by the one deadline (see "Integration"). The legacy usage kind probe
   (`legacyPCU`) is not ported: the label selector always carries the kind label.
 - `Setup` with a nil gate (G3) has no Rust counterpart: `Options::gate` is a non-optional `Arc`.
 - Extra tests with no Go case, in `providerconfig_test.rs`: verb order and bodies (get, list,
@@ -459,6 +459,11 @@ Integration (the merged units run together):
   header is sent from the field; tests read it back), `Manager::metrics_address` (tests bind
   port 0), and `ReconcilerBuilder::connection_publisher` (Go's `withLocalConnectionPublishers`
   is unexported and only its tests call it). None was a seam left unwired.
+- The ProviderConfig reconciler bounds each call by `TIMEOUT` from the start, Go's single
+  `context.WithTimeout`, instead of dropping the run. A Get past it returns `cannot get
+  ProviderConfig: context deadline exceeded`; a List past it takes the List branch (warning
+  event, wait 30s). `bounded` moved from the managed reconciler to the private
+  `reconciler/deadline.rs`; `Deadlines`, the managed reconciler's two-context pair, stays there.
 
 ## Verification
 
