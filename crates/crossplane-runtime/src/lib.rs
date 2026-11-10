@@ -39,5 +39,6 @@ pub mod logging;
 pub mod manager;
 pub mod ratelimiter;
 pub mod reconciler;
+pub mod reference;
 pub mod resource;
 pub mod statemetrics;
