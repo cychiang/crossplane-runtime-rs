@@ -306,6 +306,50 @@ Unit 1.9, queue half (work queue, driver, rate limiters):
   controller-runtime controller and priority queue). Their markers and skips follow the same
   rules and are counted on a second summary line, never in the denominator's.
 
+Unit 1.5 (`pkg/resource`):
+
+- `crossplane-core/src/errors.rs` gained `ErrorKind` (`NotControllable`, `NotAllowed`,
+  `MissingReference`), `Error::with_kind` and `Error::kind`. Go's `IsNotControllable`,
+  `IsNotAllowed` and `IsMissingReference` are type assertions on the error itself, so `kind` does
+  not look through a wrap, and `Error`'s equality now also compares it (`test.EquateErrors`
+  compares types). Callers: the managed worker's secret publisher needs
+  `resource::is_not_allowed` (`pkg/reconciler/managed/api.go:118,177`); the tracker uses it here.
+- `ApplyOption`: `ControllersMustMatch` was a scaffold misnomer (the Go function of that name is a
+  reference-selector helper) and is now `MustBeControllableBy(uid)`, which the tracker needs and
+  whose message embeds the UID. `Custom(fn(&mut current, &desired) -> Result)` covers
+  `ApplyOptionError` and `UpdateFn` (`ApplyOption::update_fn`). `ApplyOption::run(current,
+  desired)` is the one evaluator both applicators use and Go tables call. Kept:
+  `ConnectionSecretMustBeControllableBy(uid)` and `AllowUpdateIf` (over JSON). Not ported:
+  `StoreCurrentRV` (no caller outside tests).
+- New `Applicator` trait, `ApplyFn`, `ApplicatorWithRetry` and `Backoff` (Go `wait.Backoff`,
+  `retry.OnError`; jitter is random without a `rand` dependency). Both applicators keep their
+  inherent `apply` so callers need no import. `ProviderConfigUsageTracker::with_applicator`
+  mirrors Go tables setting the tracker's `c`; `new(client)` is unchanged. Without it
+  `TestTrackModern/NopUpdate` (which calls the options on a hand-built current usage) cannot be
+  ported.
+- The tracker passes `MustBeControllableBy(uid)` (the scaffold TODO said `ControllersMustMatch`)
+  and a typed `Custom` option for "reference changed", not a JSON path, so a derive that moves the
+  field cannot make every reconcile write. Its `resourceRef` has no UID, as in Go.
+- `common_credential_extractor`: `InjectedIdentity` is an error ("no extraction handler registered
+  for source: InjectedIdentity"), only `None` yields nothing. The scaffold TODO said otherwise.
+  `extract_env(lookup, ..)`, `extract_fs(..)` and `extract_secret(client, ..)` are public as in Go.
+- `local_connection_secret_for` keeps the scaffold signature. `data` is `None` when empty, which
+  serialises as Go's `omitempty` empty map. The expected owner reference in the ported case uses
+  the Rust fake's group and kind (`fake.crossplane.io/v1`, `ModernManaged`), not Go's
+  `MockOwnerGVK`, because the kind comes from the type. `get_external_tags` likewise lowers
+  `ModernManaged.fake.crossplane.io`.
+- Added files: `apply_option.rs`, `helpers.rs` (`Ignore`, `IgnoreAny`, `IsAPIErrorWrapped`,
+  `IsConditionTrue`, `GetExternalTags`, `FirstNAndSomeMore`), `reference.rs`
+  (`ReferenceStatus*`). `AttributeReferencer` is not ported (legacy reference resolution).
+- Applicators send the merge-patch body from `Object::to_json`, which always has `apiVersion`
+  and `kind`; Go marshals a typed object whose TypeMeta may be empty. Not observed against the
+  parity trace.
+- No `pkg/resource` case needed the fill-and-fail `NewMockGetFn`, so `crossplane-test` is
+  unchanged (`SecretFailureGet`'s closure ignores the object).
+- Skipped rows are in `docs/port-skips.tsv`: `GetKind` and `MustCreateObject` (scheme),
+  `ConnectionSecretFor` (cluster-scoped owner), `NotProviderConfigReferencer` (type switch), and
+  the two nil-error rows.
+
 ## Verification
 
 Rerun these; each was run on the scaffold.
