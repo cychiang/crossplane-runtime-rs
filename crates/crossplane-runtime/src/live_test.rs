@@ -402,7 +402,8 @@ impl crate::controller::Predicate for DesiredStateChangedForTest {
     }
 }
 
-/// Counts reconciles per object name.
+/// Counts reconciles per object name, in this test's namespace only: the controllers watch every
+/// namespace, and other tests and the parity runs hold MyTypes with the same names.
 #[derive(Clone, Default)]
 struct Counting(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>);
 
@@ -417,7 +418,10 @@ impl crate::reconciler::Reconcile for Counting {
         &'a self,
         req: &'a crate::reconciler::Request,
     ) -> futures::future::BoxFuture<'a, crossplane_core::errors::Result<crate::reconciler::Outcome>> {
-        *self.0.lock().unwrap().entry(req.name.clone()).or_default() += 1;
+        let ours = req.namespace.as_deref() == Some(&format!("xprs-builder-{}", std::process::id()));
+        if ours {
+            *self.0.lock().unwrap().entry(req.name.clone()).or_default() += 1;
+        }
         async { Ok(crate::reconciler::Outcome::Done) }.boxed()
     }
 }
