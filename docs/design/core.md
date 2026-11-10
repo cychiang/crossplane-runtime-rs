@@ -168,8 +168,8 @@ Rejected: none of the six. Dropped along the way as unused: the `governor`, `thi
 - We accept owning a queue and informer in exchange for controller-runtime's requeue semantics,
   which `kube::runtime::Controller` does not have.
 - `clippy::type_complexity` is allowed workspace wide (the `*Fn` adapters each hold one boxed
-  closure), and `crossplane-runtime` has `#![allow(dead_code)]` while bodies are `todo!()`. The
-  second must go when unit 1.9 closes.
+  closure), and `crossplane-runtime` had `#![allow(dead_code)]` while bodies were `todo!()`.
+  Removed at integration.
 
 ## Alternatives considered
 
@@ -448,6 +448,17 @@ Unit 1.6 (managed reconciler):
 - Tests with no Go counterpart are in `reconciler_effects_test.rs` (effect order per branch,
   the conflict table, deadlines, the annotation updater's retries), `metrics.rs` and the second
   half of `changelogger_test.rs` (wire encoding, Unix socket transport against a tonic server).
+
+Integration (the merged units run together):
+
+- `#![allow(dead_code)]` is gone from `crossplane-runtime/src/lib.rs`. What it hid, and why each
+  went where it did: `Elector::identity` was dead (the identity is passed in and only read
+  inside the elector) and is deleted. Test-only, now `#[cfg(test)]`: `KubeClient::uncached` with
+  `Reads::Direct`, `get_direct` and `list_direct` (no in-scope Go path uses an uncached reader;
+  the baseline never calls `GetAPIReader` or `client.New`), `RestConfig::user_agent` (the
+  header is sent from the field; tests read it back), `Manager::metrics_address` (tests bind
+  port 0), and `ReconcilerBuilder::connection_publisher` (Go's `withLocalConnectionPublishers`
+  is unexported and only its tests call it). None was a seam left unwired.
 
 ## Verification
 

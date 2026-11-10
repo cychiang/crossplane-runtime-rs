@@ -296,7 +296,8 @@ impl<M: Managed> ReconcilerBuilder<M> {
         self.critical_annotations = Some(Arc::new(u));
         self
     }
-    /// Go keeps this unexported (`withLocalConnectionPublishers`); so does Rust.
+    /// Go keeps this unexported (`withLocalConnectionPublishers`) and only its tests call it.
+    #[cfg(test)]
     pub(crate) fn connection_publisher(mut self, p: impl ConnectionPublisher<M>) -> Self {
         self.publisher = Some(Arc::new(p));
         self

@@ -23,7 +23,6 @@
 
 // Most bodies are still `todo!()`, so the private items they will use look dead. Each unit
 // removes this once its module is filled in; the last one deletes the line.
-#![allow(dead_code)]
 
 mod cache;
 mod kube_client;
