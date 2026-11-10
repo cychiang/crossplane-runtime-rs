@@ -55,9 +55,9 @@ Checked equal, not listed above. `parity/scripts/go-checks.sh` runs each against
   `--help` does not list the flag. Matching the baseline therefore needs no flag in the Rust template. A provider that wants one
   would parse it itself and build its config from that path.
 
-## Unverified
+## Explained
 
-- **A reconcile cycle runs slightly longer (mostly fixed).** The provider removes an MR's
+- **A delayed requeue fires about 0.7ms later than Go's.** The provider removes an MR's
   finalizer after the 30s creation grace period, at the end of a chain of rate-limited requeues,
   so the delay from the scenario's delete to that update sums every requeue's reconcile time
   (`parity/scripts/finalizer-lag.py`). Medians: Go 31012 to 31013ms (go-h to go-l); Rust 31046
@@ -66,7 +66,7 @@ Checked equal, not listed above. `parity/scripts/go-checks.sh` runs each against
   every connect, so every reconcile opened a new connection to the external service; Go's
   `http.Client` reuses `http.DefaultTransport`. Why a new connection cost several ms (DNS
   search-path lookups, TCP connect) was inferred, not measured. About 6ms of excess over the
-  chain remains unexplained. The excess lag had pushed Rust's last ProviderConfig writes into
+  chain was left, explained below. The excess lag had pushed Rust's last ProviderConfig writes into
   the cleanup window: without a cleanup delay, the gap from the last ProviderConfig
   write to cleanup's delete was at least 31ms on Go (go-h to go-j) and as little as 0 to 1ms on
   Rust (rust-4 to rust-6), which had ProviderConfig 409s in five tests against one in go-h
@@ -74,3 +74,24 @@ Checked equal, not listed above. `parity/scripts/go-checks.sh` runs each against
   (1 to 20ms) were too few samples to show the change.
   With the shared pool and no cleanup delay, rust-nodelay-1 to 3 are each equal to go-h, go-i and
   go-j (9 of 9), with a smallest gap of 12 to 29ms, so the scenarios run without the delay.
+  The rest of the excess is the timer. The chain is six reconciles: one on the delete, then
+  requeues after 1, 2, 4, 8 and 16s. Between the provider's writes, the 2, 4, 8 and 16s gaps run
+  a median 0.9 to 1.5ms over nominal on Go (go-h to go-l) and 1.6 to 2.4ms on Rust (rust-pool-1,
+  rust-nodelay-1 to 3); the 1s gap, which also carries the first reconcile, is 1003.7 to 1004.8ms
+  on Go and 1004.8 to 1005.5ms on Rust. The delete-to-first-write interval is level (3.2 to
+  3.7ms on both), so the excess comes once per delayed wake-up, not from one slow reconcile. tokio rounds every sleep deadline
+  up to the end of a millisecond (tokio 1.54.1 `runtime/time/source.rs:17-19`). Go's priority
+  queue waits on Go's runtime timer (`time.Tick`, controller-runtime v0.24.1
+  `pkg/controller/priorityqueue/priorityqueue.go:335`). Measured on Linux, in a container on the Docker daemon the kind cluster uses
+  (`parity/timer-probe/run.sh`, 3 rounds): a tokio `sleep_until` 50ms plus a sub-millisecond
+  offset away fires a median 1.40 to 1.57ms late, and controller-runtime's `AddAfter` then `Get`
+  0.62 to 0.77ms late. That is about 0.7ms a wake, about 3.5ms over five wakes. The Rust queue
+  adds nothing to tokio's sleep: `probe_add_after_overshoot` in `workqueue_test.rs` (macOS,
+  release) gives a median 2.64ms for `add_after` then `get` against 2.65ms for a bare sleep.
+  No gap shows a rate-limiter error: each is its nominal 1, 2, 4, 8 or 16s plus about a millisecond.
+  Not changed: matching Go would mean waking early on tokio's timer and finishing the wait on a
+  finer clock, for 0.7ms a requeue that no parity layer shows. A smaller per-reconcile cost was
+  seen in the run's own log: under `--debug` the Rust filter is `debug` for every crate, so
+  hyper, tower and kube's client log each request (24472 lines in rust-nodelay-1 against 590 in
+  go-k), 10 to 15us apart. That is roughly 0.1ms a reconcile; it was inferred from the
+  timestamps, not measured apart.

@@ -523,3 +523,36 @@ async fn returns_many_items() {
         }
     }
 }
+
+#[test]
+#[ignore = "timing probe: run with --release --ignored --nocapture"]
+fn probe_add_after_overshoot() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let q = queue();
+        let mut sleep_over = Vec::new();
+        let mut queue_over = Vec::new();
+        for i in 0..60u64 {
+            tokio::time::sleep(Duration::from_micros(137 * (i % 7) + 50)).await;
+            let delay = Duration::from_millis(50) + Duration::from_micros((i * 9973) % 1000);
+            let at = tokio::time::Instant::now() + delay;
+            if i % 2 == 0 {
+                tokio::time::sleep_until(at).await;
+                sleep_over.push((tokio::time::Instant::now() - at).as_secs_f64() * 1000.0);
+            } else {
+                q.add_after(key("a"), delay);
+                let got = q.get().await.unwrap();
+                queue_over.push((tokio::time::Instant::now() - at).as_secs_f64() * 1000.0);
+                q.done(&got);
+            }
+        }
+        for (name, mut v) in [("sleep_until", sleep_over), ("add_after+get", queue_over)] {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            println!("{name}: n={} mean={mean:.3}ms median={:.3}ms", v.len(), v[v.len() / 2]);
+        }
+    });
+}
