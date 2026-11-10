@@ -26,8 +26,9 @@ use leader_election::Elector;
 pub(crate) mod leader_election;
 
 /// How to reach the API server, and how fast. [`RestConfig::infer`] and
-/// [`RestConfig::from_kubeconfig`] are the public constructors and [`Manager::new`] the only consumer, so every request in the process carries
-/// the client-side throttle and the Go-style User-Agent.
+/// [`RestConfig::from_kubeconfig`] are the public constructors and [`Manager::new`] the only
+/// consumer, so every request in the process carries the client-side throttle and the Go-style
+/// User-Agent.
 #[derive(Clone)]
 pub struct RestConfig {
     kube: kube::Config,
