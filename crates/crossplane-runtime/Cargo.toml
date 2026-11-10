@@ -25,6 +25,7 @@ hostname.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tracing.workspace = true
+clap = { workspace = true, features = ["string"] }
 tracing-subscriber.workspace = true
 prometheus.workspace = true
 rand.workspace = true

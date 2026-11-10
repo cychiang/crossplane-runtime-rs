@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use crossplane_core::duration;
+use crossplane_runtime::cli::{self, go_bool};
 use crossplane_runtime::controller::{self, ChangeLogOptions, MetricOptions};
 use crossplane_runtime::feature::{self, Features};
 use crossplane_runtime::gate::Gate;
@@ -17,18 +18,24 @@ use provider_sample::provider;
 /// Go `internal/version/version.go`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Go's kingpin app also derives an environment variable for every flag from the binary name
-/// (`DefaultEnvars`). Only the names Go sets explicitly are mirrored here; the rest is for the
-/// template in unit 2.3.
+/// The flags of Go's kingpin app, flag for flag. Each kingpin bool is `--[no-]<name>`, so each
+/// bool here has a hidden `--no-<name>` twin and the last one given wins.
 #[derive(Parser, Debug)]
-#[command(about = "provider-baseline support for Crossplane.")]
+#[command(
+    about = "provider-baseline support for Crossplane.",
+    after_help = "Each boolean flag also takes a --no-<flag> form; the last one given wins."
+)]
 struct Args {
     /// Run with debug logging.
-    #[arg(short = 'd', long)]
+    #[arg(short = 'd', long, value_parser = go_bool, overrides_with = "no_debug")]
     debug: bool,
+    #[arg(long, hide = true, overrides_with = "debug")]
+    no_debug: bool,
     /// Use leader election for the controller manager.
-    #[arg(short = 'l', long, env = "LEADER_ELECTION", default_value_t = false)]
+    #[arg(short = 'l', long, env = "LEADER_ELECTION", value_parser = go_bool, overrides_with = "no_leader_election")]
     leader_election: bool,
+    #[arg(long, hide = true, overrides_with = "leader_election")]
+    no_leader_election: bool,
     /// How often all resources will be double-checked for drift from the desired state.
     #[arg(short = 's', long, default_value = "1h", value_parser = duration::parse)]
     sync: Duration,
@@ -42,11 +49,21 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     max_reconcile_rate: u32,
     /// Enable support for Management Policies.
-    #[arg(long, env = "ENABLE_MANAGEMENT_POLICIES", default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(
+        long,
+        env = "ENABLE_MANAGEMENT_POLICIES",
+        default_value_t = true,
+        value_parser = go_bool,
+        overrides_with = "no_enable_management_policies"
+    )]
     enable_management_policies: bool,
+    #[arg(long, hide = true, overrides_with = "enable_management_policies")]
+    no_enable_management_policies: bool,
     /// Enable support for capturing change logs during reconciliation.
-    #[arg(long, env = "ENABLE_CHANGE_LOGS", default_value_t = false)]
+    #[arg(long, env = "ENABLE_CHANGE_LOGS", value_parser = go_bool, overrides_with = "no_enable_changelogs")]
     enable_changelogs: bool,
+    #[arg(long, hide = true, overrides_with = "enable_changelogs")]
+    no_enable_changelogs: bool,
     /// Path for changelogs socket (if enabled).
     #[arg(
         long,
@@ -58,10 +75,28 @@ struct Args {
     provider: provider::Flags,
 }
 
+impl Args {
+    fn debug(&self) -> bool {
+        self.debug && !self.no_debug
+    }
+
+    fn leader_election(&self) -> bool {
+        self.leader_election && !self.no_leader_election
+    }
+
+    fn enable_management_policies(&self) -> bool {
+        self.enable_management_policies && !self.no_enable_management_policies
+    }
+
+    fn enable_changelogs(&self) -> bool {
+        self.enable_changelogs && !self.no_enable_changelogs
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    logging::init(args.debug);
+    let args = cli::parse::<Args>(std::env::args_os()).unwrap_or_else(|e| e.exit());
+    logging::init(args.debug());
 
     let cfg = RestConfig::infer("provider-baseline", VERSION)
         .await
@@ -70,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
         ratelimiter::limit_rest_config(cfg, args.max_reconcile_rate),
         ManagerOptions {
             sync_period: args.sync,
-            leader_election: args.leader_election.then(|| {
+            leader_election: args.leader_election().then(|| {
                 LeaderElection::new("crossplane-leader-election-provider-baseline")
                     .lease_duration(Duration::from_secs(60))
                     .renew_deadline(Duration::from_secs(50))
@@ -98,11 +133,11 @@ async fn main() -> anyhow::Result<()> {
         }),
         change_log_options: None,
     };
-    if args.enable_management_policies {
+    if args.enable_management_policies() {
         o.features.enable(feature::ENABLE_BETA_MANAGEMENT_POLICIES);
         tracing::info!(flag = %feature::ENABLE_BETA_MANAGEMENT_POLICIES, "Beta feature enabled");
     }
-    if args.enable_changelogs {
+    if args.enable_changelogs() {
         o.features.enable(feature::ENABLE_ALPHA_CHANGE_LOGS);
         tracing::info!(flag = %feature::ENABLE_ALPHA_CHANGE_LOGS, "Alpha feature enabled");
         let cl = managed::GrpcChangeLogger::connect_unix(
@@ -121,4 +156,32 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Cannot start controller manager")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::*;
+
+    fn parse(argv: &[&str]) -> Args {
+        cli::parse(argv.iter().map(OsString::from)).expect("flags parse")
+    }
+
+    #[test]
+    fn defaults_match_the_go_baseline() {
+        let a = parse(&["provider-sample"]);
+        assert!(!a.debug() && !a.leader_election() && !a.enable_changelogs());
+        assert!(a.enable_management_policies(), "management policies default on");
+        assert_eq!(a.sync, Duration::from_secs(3600));
+        assert_eq!(a.poll, Duration::from_secs(60));
+        assert_eq!(a.max_reconcile_rate, 10);
+    }
+
+    #[test]
+    fn bools_take_a_no_prefix_and_the_last_one_wins() {
+        assert!(!parse(&["provider-sample", "--no-enable-management-policies"]).enable_management_policies());
+        assert!(parse(&["provider-sample", "--no-debug", "--debug"]).debug());
+        assert!(!parse(&["provider-sample", "-d", "--no-debug"]).debug());
+    }
 }

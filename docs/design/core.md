@@ -106,6 +106,7 @@ Each unit owns the listed files. Units do not share files except where noted.
 | `crossplane-runtime/src/reconciler/providerconfig.rs` | `pkg/reconciler/providerconfig` | 1.7 |
 | `crossplane-runtime/src/gate.rs`, `reconciler/customresourcesgate.rs` | `pkg/gate`, `pkg/reconciler/customresourcesgate` | 1.8 |
 | `crossplane-runtime/src/controller/{mod,workqueue,driver}.rs`, `cache.rs`, `manager.rs`, `ratelimiter.rs`, `statemetrics.rs`, `reconciler/mod.rs` | `pkg/controller`, `pkg/ratelimiter`, `pkg/statemetrics`, controller-runtime | 1.9 |
+| `crossplane-runtime/src/cli.rs` | kingpin (a provider's `cmd/provider/main.go` flag parsing) | 2.3 |
 | `crossplane-derive/src/lib.rs` | crossplane-tools angryjet | 1.10 |
 | `crossplane-runtime/src/reference.rs` (`Managed::resolve_references` is its hook) | `pkg/reference` | 1.11 |
 
