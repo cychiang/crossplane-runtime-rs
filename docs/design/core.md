@@ -229,9 +229,9 @@ Unit 1.9, queue half (work queue, driver, rate limiters):
   its doc comment saying it takes the maximum with another limiter is stale), and MaxOf appears
   only in `DefaultControllerRateLimiter`, which controller-runtime uses only with the priority
   queue off. The bucket applies only through the global wrapper.
-- The `governor` dependency stays dropped: the bucket is hand-written over
-  `golang.org/x/time/rate`'s arithmetic, because `governor` refuses a request when no token is
-  free, where Go's `Reserve` grants it and goes into debt (see open question 2).
+- The `governor` dependency stays dropped. The bucket is a few lines hand-written over
+  `golang.org/x/time/rate`'s arithmetic, so Go's grant-and-go-into-debt `Reserve` (open
+  question 2) is copied exactly instead of mapped onto another crate's model.
 - `hack/port-coverage.py` reads a second listing, `docs/port-extra.tsv`, of Go cases outside the
   denominator that are ported as the spec for code the runtime owns (client-go workqueue,
   controller-runtime controller and priority queue). Their markers and skips follow the same

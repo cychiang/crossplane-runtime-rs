@@ -30,7 +30,9 @@ pub(super) async fn run(
     let queue = Arc::new(WorkQueue::new(options.rate_limiter.clone()));
     let span = tracing::info_span!("controller", controller = %name);
 
-    let feeder = tokio::spawn({
+    // A JoinSet, not a bare spawn, so that dropping `run` also stops the feeder.
+    let mut feeder = JoinSet::new();
+    feeder.spawn({
         let queue = queue.clone();
         async move {
             let mut keys = std::pin::pin!(keys);
@@ -51,7 +53,7 @@ pub(super) async fn run(
         Some(Err(err)) = workers.join_next() => err.try_into_panic().ok(),
     };
     queue.shut_down();
-    feeder.abort();
+    feeder.abort_all();
     if let Some(panic) = panicked {
         resume_unwind(panic);
     }

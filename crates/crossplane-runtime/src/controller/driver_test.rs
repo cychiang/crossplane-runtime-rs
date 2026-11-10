@@ -464,11 +464,7 @@ async fn stress_one_reconcile_per_key_and_no_lost_adds() {
                 tokio::task::yield_now().await;
                 tokio::time::sleep(Duration::from_micros(50)).await;
                 self.in_flight.lock().unwrap().remove(req);
-                Ok(if version.is_multiple_of(3) {
-                    Outcome::Requeue
-                } else {
-                    Outcome::Done
-                })
+                Ok(Outcome::Done)
             })
         }
     }

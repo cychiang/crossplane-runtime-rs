@@ -31,6 +31,13 @@ fn get_now(q: &WorkQueue) -> Option<Request> {
     q.get().now_or_never().flatten()
 }
 
+/// Fails, instead of hanging, when a wakeup is missed.
+async fn bounded<T>(f: impl Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(60), f)
+        .await
+        .expect("the queue wakes its waiters within a minute")
+}
+
 /// Runs other tasks to their next await without moving the paused clock.
 async fn settle() {
     for _ in 0..10 {
@@ -73,7 +80,7 @@ async fn basic() {
     q.shut_down();
     q.add(key("added after shutdown!"));
     for c in consumers {
-        c.await.unwrap();
+        bounded(c).await.unwrap();
     }
 }
 
@@ -124,7 +131,7 @@ async fn add_while_processing() {
     .expect("every item is processed at least twice");
     q.shut_down();
     for c in consumers {
-        c.await.unwrap();
+        bounded(c).await.unwrap();
     }
 }
 
@@ -189,7 +196,7 @@ async fn collapse_while_processing() {
     settle().await;
     assert!(!worker.is_finished(), "worker should be blocked until we are done");
     q.done(&key("foo"));
-    worker.await.unwrap();
+    bounded(worker).await.unwrap();
     assert_eq!(q.len(), 0, "There should be no more objects in the queue");
 }
 
@@ -408,8 +415,8 @@ async fn get_after_shut_down_returns_none() {
     q.add(key("baz"));
     q.shut_down();
     q.add_after(key("foo"), Duration::from_secs(1));
-    assert_eq!(q.get().await, None);
-    assert_eq!(q.get().await, None);
+    assert_eq!(bounded(q.get()).await, None);
+    assert_eq!(bounded(q.get()).await, None);
 }
 
 /// Go checks the depth metric; `len` is the same number. Added here: the cancelled delay does
@@ -468,7 +475,7 @@ async fn a_blocked_get_wakes_when_a_delay_expires() {
     settle().await;
     let start = Instant::now();
     q.add_after(key("foo"), Duration::from_secs(30));
-    let (item, at) = got.await.unwrap();
+    let (item, at) = bounded(got).await.unwrap();
     assert_eq!(item, Some(key("foo")));
     assert_eq!(at - start, Duration::from_secs(30));
 }
@@ -482,7 +489,7 @@ async fn a_blocked_get_wakes_on_shut_down() {
     });
     settle().await;
     q.shut_down();
-    assert_eq!(got.await.unwrap(), None);
+    assert_eq!(bounded(got).await.unwrap(), None);
 }
 
 /// Go draws a random number per add to choose a short delay or a priority; priorities are not
@@ -512,7 +519,7 @@ async fn returns_many_items() {
             })
             .collect();
         for g in getters {
-            g.await.unwrap();
+            bounded(g).await.unwrap();
         }
     }
 }
