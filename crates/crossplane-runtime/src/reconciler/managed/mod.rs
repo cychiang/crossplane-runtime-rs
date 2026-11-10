@@ -26,6 +26,8 @@ mod policy_test;
 #[cfg(test)]
 mod reconciler_annotations_test;
 #[cfg(test)]
+mod reconciler_effects_test;
+#[cfg(test)]
 mod reconciler_modern_test;
 
 use std::ops::ControlFlow;
