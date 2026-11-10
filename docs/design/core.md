@@ -472,6 +472,27 @@ Integration (the merged units run together):
   ProviderConfig: context deadline exceeded`; a List past it takes the List branch (warning
   event, wait 30s). `bounded` moved from the managed reconciler to the private
   `reconciler/deadline.rs`; `Deadlines`, the managed reconciler's two-context pair, stays there.
+- `e2e_test.rs` runs the units together against a live cluster: a Manager, a managed controller
+  wired as `wiring.rs` wires one (rate-limited reconciler, `desired_state_changed`, the API
+  recorder), a per-process `xprs-e2e-<pid>.example.com` CRD it installs and removes, and an
+  in-memory external system. It asserts through an uncached client: finalizer, external-name
+  and create annotations, `Synced`/`Ready` with Go's reasons, core/v1 Events with Go's reasons,
+  messages and source component, a spec change reaching external update, the pause annotation
+  stopping observes with `ReconcilePaused`, unpausing applying the change made while paused, and
+  deletion calling external delete and removing the finalizer. What the first run showed:
+  - It lives inside the crate, not in `examples/provider-sample/tests`, because `RestConfig` has
+    only `infer`, which reads `KUBECONFIG` from the environment, and `unsafe_code` is forbidden,
+    so a test cannot point it at a chosen kubeconfig. A provider that wants Go's `--kubeconfig`
+    flag cannot either. Public API left unchanged; a `RestConfig::from_kubeconfig` would close
+    it.
+  - A delete within `creationGracePeriod` (30s) of a successful create waits it out: Observe
+    reports not-exists, so the Pending branch (`R:1218`, before the deletion branch at `R:1231`)
+    records `PendingExternalResource` and requeues until the grace period ends. Go does the same.
+    The test sets a 3s grace period through `creation_grace_period`.
+  - With a 1s poll, the `desired_state_changed` filter is not observable: polls pick up a spec
+    change either way. The builder live test is what pins the filter.
+  - Repeated identical events (the second `UpdatedExternalResource`) show as one Event with a
+    higher count, the correlator's patch, as in the Go traces.
 
 ## Verification
 

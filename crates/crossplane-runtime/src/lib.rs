@@ -25,6 +25,8 @@
 // removes this once its module is filled in; the last one deletes the line.
 
 mod cache;
+#[cfg(test)]
+mod e2e_test;
 mod kube_client;
 #[cfg(test)]
 mod live_test;
