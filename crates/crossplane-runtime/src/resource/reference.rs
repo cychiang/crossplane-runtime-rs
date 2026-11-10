@@ -32,3 +32,7 @@ impl fmt::Display for ReferenceStatus {
         write!(f, "{{reference:{} status:{}}}", self.name, self.status)
     }
 }
+
+#[cfg(test)]
+#[path = "reference_test.rs"]
+mod tests;

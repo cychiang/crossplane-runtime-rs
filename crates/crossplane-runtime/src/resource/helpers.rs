@@ -96,3 +96,7 @@ pub fn stable_n_and_some_more(n: i32, names: &[String]) -> String {
     sorted.sort();
     first_n_and_some_more(n, &sorted)
 }
+
+#[cfg(test)]
+#[path = "helpers_test.rs"]
+mod tests;

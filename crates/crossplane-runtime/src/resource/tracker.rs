@@ -99,3 +99,7 @@ impl<U: ProviderConfigUsage> ProviderConfigUsageTracker<U> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tracker_test.rs"]
+mod tests;

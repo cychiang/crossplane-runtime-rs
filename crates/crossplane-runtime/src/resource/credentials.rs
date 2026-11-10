@@ -55,3 +55,7 @@ pub async fn common_credential_extractor(
         ))),
     }
 }
+
+#[cfg(test)]
+#[path = "credentials_test.rs"]
+mod tests;

@@ -25,3 +25,7 @@ pub fn local_connection_secret_for<M: Managed>(mg: &M, data: &ConnectionDetails)
         ..Default::default()
     })
 }
+
+#[cfg(test)]
+#[path = "connection_test.rs"]
+mod tests;
