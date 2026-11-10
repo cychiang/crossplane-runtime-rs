@@ -851,3 +851,22 @@ fn config_map() -> k8s_openapi::api::core::v1::ConfigMap {
         ..Default::default()
     }
 }
+
+#[tokio::test]
+async fn a_recorded_event_is_logged_at_debug_by_the_events_logger() {
+    let (tx, _rx) = mpsc::channel(MAX_QUEUED_EVENTS);
+    let recorder = ApiRecorder::new("eventTest", tx);
+    let ((), logged) = crate::logging::capture(async {
+        recorder.record(
+            pod_ref("bar", None),
+            EventType::Warning,
+            "CannotObserve",
+            "cannot observe: boom",
+        );
+    })
+    .await;
+    assert!(logged.contains(" DEBUG events: cannot observe: boom"), "{logged}");
+    assert!(logged.contains("type=Warning"), "{logged}");
+    assert!(logged.contains(r#"reason="CannotObserve""#), "{logged}");
+    assert!(logged.contains(r#"object={"#), "{logged}");
+}

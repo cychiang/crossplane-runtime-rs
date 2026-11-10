@@ -44,10 +44,12 @@ impl Reconcile for Reconciler {
             let gvks = to_gvks(&crd);
             if !is_established(&crd) || crd.metadata.deletion_timestamp.is_some() {
                 for gvk in gvks.into_keys() {
+                    tracing::debug!(gvk = %gvk_display(&gvk), "gvk is not ready");
                     self.gate.set(gvk, false);
                 }
             } else {
                 for (gvk, _) in gvks.into_iter().filter(|(_, served)| *served) {
+                    tracing::debug!(gvk = %gvk_display(&gvk), "gvk is ready");
                     self.gate.set(gvk, true);
                 }
             }
@@ -55,6 +57,11 @@ impl Reconcile for Reconciler {
         }
         .boxed()
     }
+}
+
+/// Go's `schema.GroupVersionKind.String()`, which zap logs for the `gvk` field.
+fn gvk_display(gvk: &GroupVersionKind) -> String {
+    format!("{}/{}, Kind={}", gvk.group, gvk.version, gvk.kind)
 }
 
 /// Go `toGVKs`: every version of the CRD, with whether it is served. A repeated version name keeps

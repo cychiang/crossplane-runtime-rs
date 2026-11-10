@@ -1312,3 +1312,75 @@ async fn the_critical_annotation_updater_gives_up_after_five_attempts() {
     test::assert_result("retry", "every attempt fails", &want, &got);
     assert_eq!(5, *attempts.lock().unwrap());
 }
+
+/// What Go's `log.WithValues` puts on every line of a request, as tracing span fields.
+const GO_REQUEST_FIELDS: &str = r#"request={"name":"mg","namespace":"ns"}"#;
+
+fn logged_lines(logged: &str) -> Vec<&str> {
+    logged.lines().filter(|l| l.contains("reconcile{")).collect()
+}
+
+fn assert_logged(logged: &str, message: &str, fields: &[&str]) {
+    let line = logged_lines(logged)
+        .into_iter()
+        .find(|l| l.ends_with(&format!(": {message}")) || l.contains(&format!(": {message} ")))
+        .unwrap_or_else(|| panic!("no line for {message:?} in:\n{logged}"));
+    assert!(line.contains(" DEBUG "), "{message:?} is a debug line in Go: {line}");
+    assert!(
+        line.contains(GO_REQUEST_FIELDS),
+        "{message:?} lacks the request: {line}"
+    );
+    for field in fields {
+        assert!(line.contains(field), "{message:?} lacks {field:?}: {line}");
+    }
+}
+
+#[tokio::test]
+async fn an_up_to_date_resource_logs_reconciling_and_up_to_date_with_the_request_fields() {
+    let scenario = Scenario {
+        observation: up_to_date(),
+        ..Default::default()
+    };
+    let (r, _) = reconciler(scenario);
+    let (got, logged) = crate::logging::capture(r.reconcile(&Request::namespaced("ns", "mg"))).await;
+    test::assert_result("B43", "up to date polls", &Ok(POLL), &got);
+
+    assert_logged(&logged, "Reconciling", &[]);
+    assert_logged(
+        &logged,
+        "External resource is up to date",
+        &[
+            "uid=",
+            "version=",
+            "external-name=",
+            "requeue-after=2023-11-14T22:14:30Z",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn a_create_logs_the_request_and_the_external_name_the_create_set() {
+    let (r, _) = reconciler(Scenario::default());
+    let (got, logged) = crate::logging::capture(r.reconcile(&Request::namespaced("ns", "mg"))).await;
+    test::assert_result("B41", "create requeues", &Ok(Outcome::Requeue), &got);
+
+    assert_logged(
+        &logged,
+        "Successfully requested creation of external resource",
+        &["uid=", r#"external-name="created""#],
+    );
+}
+
+#[tokio::test]
+async fn a_missing_managed_resource_logs_cannot_get_managed_resource() {
+    let client = MockClient {
+        get: Some(Box::new(|_, _| Err(Error::not_found()))),
+        ..Default::default()
+    };
+    let r = Reconciler::<Mg>::builder(Arc::new(client)).build();
+    let (got, logged) = crate::logging::capture(r.reconcile(&Request::namespaced("ns", "mg"))).await;
+    test::assert_result("B02", "not found is done", &Ok(Outcome::Done), &got);
+
+    assert_logged(&logged, "Reconciling", &[]);
+    assert_logged(&logged, "Cannot get managed resource", &["error="]);
+}

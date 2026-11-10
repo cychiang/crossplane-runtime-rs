@@ -17,8 +17,11 @@ use futures::future::BoxFuture;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use k8s_openapi::jiff::Timestamp;
 use tokio::time::Instant;
+use tracing::Instrument;
+use tracing::field::Empty;
 
 use crate::event::{Event, NopRecorder, Reason, Recorder};
+use crate::logging;
 use crate::reconciler::deadline::bounded;
 use crate::reconciler::{Outcome, Reconcile, Request};
 
@@ -99,7 +102,24 @@ impl<PC: ProviderConfig, U: ProviderConfigUsage> Reconcile for Reconciler<PC, U>
     /// conflict handling. Every call ends at `TIMEOUT` after the start, Go's one context; a call
     /// past it fails and the run carries on through the branch that handles that failure.
     fn reconcile<'a>(&'a self, req: &'a Request) -> BoxFuture<'a, Result<Outcome>> {
-        self.run(req, Instant::now() + TIMEOUT).boxed()
+        async move {
+            let span = tracing::info_span!(
+                "reconcile",
+                request = %logging::RequestFields(req),
+                uid = Empty,
+                version = Empty,
+                name = Empty,
+                namespace = Empty,
+                usages = Empty,
+            );
+            async {
+                tracing::debug!("Reconciling");
+                self.run(req, Instant::now() + TIMEOUT).await
+            }
+            .instrument(span)
+            .await
+        }
+        .boxed()
     }
 }
 
@@ -107,9 +127,20 @@ impl<PC: ProviderConfig, U: ProviderConfigUsage> Reconciler<PC, U> {
     async fn run(&self, req: &Request, deadline: Instant) -> Result<Outcome> {
         let mut pc = match bounded(deadline, self.client.get_as::<PC>(req)).await {
             Ok(pc) => pc,
-            Err(e) if e.is_not_found() => return Ok(Outcome::Done),
-            Err(e) => return Err(e.wrap(ERR_GET_PC)),
+            Err(e) => {
+                tracing::debug!(error = %e, "{ERR_GET_PC}");
+                return if e.is_not_found() {
+                    Ok(Outcome::Done)
+                } else {
+                    Err(e.wrap(ERR_GET_PC))
+                };
+            }
         };
+        let span = tracing::Span::current();
+        span.record("uid", pc.meta().uid.as_deref().unwrap_or_default());
+        span.record("version", pc.meta().resource_version.as_deref().unwrap_or_default());
+        span.record("name", meta::name(&pc));
+        span.record("namespace", meta::namespace(&pc));
 
         let mut options = ListOptions::default();
         options
@@ -123,6 +154,7 @@ impl<PC: ProviderConfig, U: ProviderConfigUsage> Reconciler<PC, U> {
         let usages = match bounded(deadline, self.client.list_as::<U>(&options)).await {
             Ok(usages) => usages,
             Err(e) => {
+                tracing::debug!(error = %e, "{ERR_LIST_PCUS}");
                 self.warn(&pc, e.wrap(ERR_LIST_PCUS));
                 return Ok(Outcome::RequeueAfter(SHORT_WAIT));
             }
@@ -139,14 +171,17 @@ impl<PC: ProviderConfig, U: ProviderConfigUsage> Reconciler<PC, U> {
                 continue;
             }
             if let Err(e) = ignore_not_found(bounded(deadline, self.client.delete(usage)).await) {
+                tracing::debug!(error = %e, "{ERR_DELETE_PCU}");
                 self.warn(&pc, e.wrap(ERR_DELETE_PCU));
                 return Ok(Outcome::RequeueAfter(SHORT_WAIT));
             }
             users -= 1;
         }
 
+        tracing::Span::current().record("usages", users);
         if meta::was_deleted(&pc) {
             if users > 0 {
+                tracing::debug!("{BLOCKING_MESSAGE}");
                 self.warn(&pc, Error::new(BLOCKING_MESSAGE));
                 pc.set_users(users);
                 pc.set_conditions([terminating().with_message(BLOCKING_MESSAGE)]);

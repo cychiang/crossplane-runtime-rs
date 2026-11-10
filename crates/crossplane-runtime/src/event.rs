@@ -119,6 +119,14 @@ impl ApiRecorder {
             component: Some(self.component.to_string()),
             host: None,
         };
+        // controller-runtime logs each recorded event at V(1) through a logger named `events`.
+        tracing::debug!(
+            target: "events",
+            r#type = %type_str(type_),
+            object = %serde_json::to_string(&involved).unwrap_or_default(),
+            reason,
+            "{message}"
+        );
         let event = make_event(
             involved,
             &self.annotations,

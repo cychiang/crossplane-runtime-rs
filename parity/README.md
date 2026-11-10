@@ -185,6 +185,15 @@ Each test runs in its own fixed namespace with its own Secret and namespaced Pro
 `default-providerconfig-ref` sets `providerConfigRef.kind: ProviderConfig`, because the CRD default
 `ClusterProviderConfig` does not exist in this provider.
 
+## Comparing logs
+
+Logs are not a `trace-diff` layer. `scripts/log-messages.py <runA> <runB>` reads each run's
+`provider.log` (Go's zap console format or the Rust provider's `--debug` pretty format) and prints,
+per level, the distinct message texts each run lacks. It compares messages only, not fields,
+timestamps or counts. Add `--exit-code` to exit 1 when any level differs. Go's controller-runtime
+lines ("Starting Controller") and anything the provider logs itself will show as differences; the
+runtime's own messages are listed in `docs/logging-calls.tsv`.
+
 ## Comparing runs
 
 `trace-diff` (`parity/trace-diff/`, a standalone crate) compares two run directories:

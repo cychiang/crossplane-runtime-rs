@@ -1,0 +1,60 @@
+go_site	level	message	fields	rust_site	status
+managed/reconciler.go:925	debug	Reconciling	request	Reconciler::reconcile	ported
+managed/reconciler.go:937	debug	Cannot get managed resource	error	Reconciler::run	ported
+managed/reconciler.go:972	debug	Reconciliation is paused either through the `spec.managementPolicies` or the pause annotation	annotation	Reconciler::run	ported
+managed/reconciler.go:989	debug	Processing reconcile request	token	Reconciler::run	ported
+managed/reconciler.go:1017	debug	(policy validation error text)	-	Run::validate_policy	ported
+managed/reconciler.go:1045	debug	Cannot unpublish connection details	error	Run::unpublish_and_remove_finalizer	ported
+managed/reconciler.go:1062	debug	Cannot remove managed resource finalizer	error	Run::unpublish_and_remove_finalizer	ported
+managed/reconciler.go:1078	debug	Successfully deleted managed resource	-	Run::unpublish_and_remove_finalizer	ported
+managed/reconciler.go:1087	debug	Cannot initialize managed resource	error	Run::initialize	ported
+managed/reconciler.go:1106	debug	cannot determine creation result - remove the crossplane.io/external-create-pending annotation if it is safe to proceed	-	Run::initialize	ported
+managed/reconciler.go:1113	debug	Cannot determine creation result, but proceeding due to deterministic external name	-	Run::initialize	already present, now inside the request span
+managed/reconciler.go:1132	debug	Cannot resolve managed resource references	error	Run::resolve_references	ported
+managed/reconciler.go:1152	debug	Cannot connect to provider	error	Run::connect	ported
+managed/reconciler.go:1166	debug	Cannot disconnect from provider	error	Run::disconnect (connector)	ported
+managed/reconciler.go:1172	debug	Cannot disconnect from provider	error	Run::disconnect (client)	ported
+managed/reconciler.go:1186	debug	Cannot observe external resource	error	Run::observe	ported
+managed/reconciler.go:1208	debug	External resource does not exist	requeue-after	Run::observe	ported
+managed/reconciler.go:1219	debug	Waiting for external resource existence to be confirmed	-	Run::observe	ported
+managed/reconciler.go:1237	debug	Delay external deletion until all finalizers have been removed	-	Run::delete_external	ported
+managed/reconciler.go:1250	debug	Cannot delete external resource	error	Run::delete_external	ported
+managed/reconciler.go:1253	info	cannot record change log entry	error	Run::log_change	ported (one Rust site for all six Go change-log sites)
+managed/reconciler.go:1269	debug	Successfully requested deletion of external resource	-	Run::delete_external	ported
+managed/reconciler.go:1272	info	cannot record change log entry	error	Run::log_change	ported (see 1253)
+managed/reconciler.go:1286	debug	Cannot unpublish connection details	error	Run::unpublish_and_remove_finalizer	ported (see 1045)
+managed/reconciler.go:1303	debug	Cannot remove managed resource finalizer	error	Run::unpublish_and_remove_finalizer	ported (see 1062)
+managed/reconciler.go:1319	debug	Successfully deleted managed resource	-	Run::unpublish_and_remove_finalizer	ported (see 1078)
+managed/reconciler.go:1328	debug	Cannot publish connection details	error	Run::publish_observed_and_add_finalizer	ported
+managed/reconciler.go:1344	debug	Cannot add finalizer	error	Run::publish_observed_and_add_finalizer	ported
+managed/reconciler.go:1366	debug	cannot update managed resource	error	Run::create_external	ported
+managed/reconciler.go:1385	debug	Cannot create external resource	error	Run::create_external	ported
+managed/reconciler.go:1400	debug	cannot update managed resource annotations	error	Run::create_external	ported
+managed/reconciler.go:1411	info	cannot record change log entry	error	Run::log_change	ported (see 1253)
+managed/reconciler.go:1424	info	cannot record change log entry	error	Run::log_change	ported (see 1253)
+managed/reconciler.go:1440	debug	cannot update managed resource annotations	error	Run::create_external	ported
+managed/reconciler.go:1456	debug	Cannot publish connection details	error	Run::create_external	ported
+managed/reconciler.go:1472	debug	Successfully requested creation of external resource	-	Run::create_external	ported
+managed/reconciler.go:1488	debug	cannot update managed resource	error	Run::late_initialize	ported
+managed/reconciler.go:1504	debug	External resource is up to date	requeue-after	Run::up_to_date	ported
+managed/reconciler.go:1520	debug	Resource does not exist so skip update	requeue-after	Run::succeed_and_poll (B44)	ported
+managed/reconciler.go:1527	debug	External resource differs from desired state	diff	Run::with_external	already present, now inside the request span
+managed/reconciler.go:1533	debug	Skipping update due to managementPolicies. Reconciliation succeeded	requeue-after	Run::succeed_and_poll (B45)	ported
+managed/reconciler.go:1546	debug	Cannot update external resource	-	Run::update_external	ported
+managed/reconciler.go:1549	info	cannot record change log entry	error	Run::log_change	ported (see 1253)
+managed/reconciler.go:1562	info	cannot record change log entry	error	Run::log_change	ported (see 1253)
+managed/reconciler.go:1569	debug	Cannot publish connection details	error	Run::update_external	ported
+managed/reconciler.go:1582	debug	Successfully requested update of external resource	requeue-after	Run::update_external	ported
+providerconfig/reconciler.go:151	debug	Reconciling	request	providerconfig::Reconciler::reconcile	ported
+providerconfig/reconciler.go:161	debug	cannot get ProviderConfig	error	providerconfig::Reconciler::run	ported
+providerconfig/reconciler.go:188	debug	cannot list ProviderConfigUsages	error	providerconfig::Reconciler::run	ported
+providerconfig/reconciler.go:202	debug	cannot delete ProviderConfigUsage	error	providerconfig::Reconciler::run	ported
+providerconfig/reconciler.go:218	debug	Blocking deletion while usages still exist	-	providerconfig::Reconciler::run	ported
+providerconfig/reconciler.go:231	debug	cannot update ProviderConfig	error	providerconfig::Reconciler::update_or_wait	already present; span fields differ (see DIVERGENCES.md)
+providerconfig/reconciler.go:242	debug	cannot update ProviderConfig	error	providerconfig::Reconciler::update_or_wait	already present; span fields differ (see DIVERGENCES.md)
+customresourcesgate/reconciler.go:48	debug	gvk is not ready	gvk	customresourcesgate::Reconciler::reconcile	ported
+customresourcesgate/reconciler.go:58	debug	gvk is ready	gvk	customresourcesgate::Reconciler::reconcile	ported
+(controller-runtime) internal/recorder/recorder.go	debug	(each event's message), logger "events"	type, object, reason	event::ApiRecorder::record	ported
+logging/logging.go:85,89	-	Logger.Info / Logger.Debug wrappers	-	-	skipped: the wrapper itself; tracing macros are the Rust API
+logging/klog.go:39	-	klog adapter	-	-	skipped: no klog in Rust; HTTP transport stays at info (logging.rs)
+event/event.go, statemetrics, controller, gate, ratelimiter	-	no log calls	-	-	none exist in v2.4.3
