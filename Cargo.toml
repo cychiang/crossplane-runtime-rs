@@ -33,6 +33,12 @@ tokio-util = "0.7.20"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 rand = "0.9"
+tonic = { version = "0.14.9", default-features = false, features = ["channel", "codegen"] }
+tonic-prost = "0.14.9"
+prost = "0.14.4"
+prost-types = "0.14.4"
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+tower = { version = "0.5.3", features = ["util"] }
 prometheus = { version = "0.14", default-features = false }
 clap = { version = "4.6", features = ["derive", "env"] }
 anyhow = "1"

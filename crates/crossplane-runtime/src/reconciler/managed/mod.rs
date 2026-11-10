@@ -11,12 +11,14 @@
 //! aliases for `reconciler.go:n` and `api.go:n` in the Go package. Within a branch the order of
 //! effects is Go's: change log, event, condition, status write.
 
-mod changelog;
+pub mod changelog;
 mod collaborators;
 mod external;
 mod metrics;
 pub mod policy;
 
+#[cfg(test)]
+mod changelogger_test;
 #[cfg(test)]
 mod policy_test;
 #[cfg(test)]
