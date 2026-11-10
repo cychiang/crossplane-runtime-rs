@@ -324,8 +324,6 @@ Unit 1.9, rest (RestConfig, cache, manager, builder, event recorder, statemetric
 - The cache has no `ErrCacheNotStarted`: an informer starts on the first read or subscription,
   before or after `Manager::start`. Go's cache refuses reads before start; a provider never reads
   before start, so nothing observable changes.
-- `object_reference` keeps the namespace of a cluster-scoped object where client-go's `GetReference`
-  clears it. No cluster-scoped kind is recorded on in this runtime yet.
 - `controller_runtime_*` and `workqueue_*` metrics are not ported. The metrics endpoint serves
   only what a provider registers (`crossplane_managed_resource_*` and the managed reconciler's).
 - The manager's elector is written here, client-go's `tryAcquireOrRenew` over a PUT with the
@@ -398,8 +396,8 @@ None of these is resolved by the scaffold.
    repeats within ten minutes are a patch of `count`, `lastTimestamp` and `message` (live: 12
    identical events gave 1 create and 11 patches in the audit log, the Go baseline's shape).
    Aggregation into "(combined from similar events)" needs 10 distinct messages with one reason
-   in ten minutes, and the spam filter 25 events per object in a burst; neither was seen in the
-   parity traces.
+   in ten minutes, and the spam filter 25 events per object in a burst. The audit policy keeps
+   no request bodies, so whether a parity run reaches either is not known from the traces.
 6. Driver side answered (unit 1.9): the driver adds no reconcile timeout, because
    controller-runtime's `ReconciliationTimeout` is unset in the baseline; the managed reconciler
    owns the timeout. What the driver guarantees is that a key is released on every exit path
