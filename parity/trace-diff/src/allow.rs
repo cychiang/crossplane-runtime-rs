@@ -2,7 +2,8 @@ use crate::diff::{Difference, Kind, Layer};
 use serde::Deserialize;
 
 /// One reasoned exception. `key`, `a` and `b` are globs where `*` matches any
-/// run of characters; an omitted glob matches anything.
+/// run of characters; an omitted glob matches anything. `detail` is one glob or
+/// a list, and every changed path of the difference must match one of them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Allowance {
@@ -14,7 +15,7 @@ pub struct Allowance {
     #[serde(default)]
     pub b: Option<String>,
     #[serde(default)]
-    pub detail: Option<String>,
+    pub detail: Option<Globs>,
     pub reason: String,
 }
 
@@ -25,7 +26,25 @@ impl Allowance {
             && glob(&self.key, &d.key)
             && self.a.as_deref().is_none_or(|p| glob(p, &d.a))
             && self.b.as_deref().is_none_or(|p| glob(p, &d.b))
-            && self.detail.as_deref().is_none_or(|p| !d.detail.is_empty() && d.detail.iter().all(|line| glob(p, line)))
+            && self.detail.as_ref().is_none_or(|ps| {
+                !d.detail.is_empty() && d.detail.iter().all(|line| ps.list().iter().any(|p| glob(p, line)))
+            })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Globs {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Globs {
+    fn list(&self) -> &[String] {
+        match self {
+            Globs::One(p) => std::slice::from_ref(p),
+            Globs::Many(ps) => ps,
+        }
     }
 }
 
@@ -83,7 +102,9 @@ mod tests {
 
     #[test]
     fn a_detail_glob_must_match_every_changed_path() {
-        let al = &parse(r#"{"layer":"audit","key":"*","kind":"changed","detail":".status: * -> (absent)","reason":"r"}"#).unwrap()[0];
+        let al =
+            &parse(r#"{"layer":"audit","key":"*","kind":"changed","detail":".status: * -> (absent)","reason":"r"}"#)
+                .unwrap()[0];
         let d = |detail: &[&str]| Difference {
             layer: Layer::Audit,
             key: "g/r ns/n".into(),
@@ -93,8 +114,31 @@ mod tests {
             detail: detail.iter().map(|s| s.to_string()).collect(),
         };
         assert!(al.matches(&d(&[".status: {} -> (absent)"])));
-        assert!(!al.matches(&d(&[".status: {} -> (absent)", r#".metadata.finalizers[0]: "a" -> "b""#])));
+        assert!(!al.matches(&d(&[
+            ".status: {} -> (absent)",
+            r#".metadata.finalizers[0]: "a" -> "b""#
+        ])));
         assert!(!al.matches(&d(&[".status.conditions[0].reason: \"Creating\" -> \"Available\""])));
+        assert!(!al.matches(&d(&[])));
+    }
+
+    #[test]
+    fn a_detail_list_matches_when_each_changed_path_matches_one_of_its_globs() {
+        let al = &parse(r#"{"layer":"audit","key":"*","kind":"changed","detail":[".apiVersion: (absent) -> \"v1\"",".kind: (absent) -> \"Secret\""],"reason":"r"}"#).unwrap()[0];
+        let d = |detail: &[&str]| Difference {
+            layer: Layer::Audit,
+            key: "core/secrets ns/n".into(),
+            kind: Kind::Changed,
+            a: "#2 patch".into(),
+            b: "#2 patch".into(),
+            detail: detail.iter().map(|s| s.to_string()).collect(),
+        };
+        assert!(al.matches(&d(&[
+            r#".apiVersion: (absent) -> "v1""#,
+            r#".kind: (absent) -> "Secret""#
+        ])));
+        assert!(al.matches(&d(&[r#".kind: (absent) -> "Secret""#])));
+        assert!(!al.matches(&d(&[r#".apiVersion: (absent) -> "v1""#, r#".type: "a" -> "b""#])));
         assert!(!al.matches(&d(&[])));
     }
 
