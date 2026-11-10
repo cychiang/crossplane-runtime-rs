@@ -394,10 +394,10 @@ Unit 1.9, rest (RestConfig, cache, manager, builder, event recorder, statemetric
   resourceVersion, rather than `kube-lease-manager`, which judges expiry from the server's
   `renewTime` against the local clock and renews without a resourceVersion
   (`leader_election.rs` module doc).
-- The builder's live test uses a test-local copy of `DesiredStateChanged` and a test-local
-  ProviderConfigUsage-shaped handler, because `resource::predicates` and
-  `EnqueueRequestForProviderConfig` belong to unit 1.5 and are `todo!()` on this branch. Rerun it
-  with the real ones after the merge.
+- The builder's live test used test-local copies of `DesiredStateChanged` and of a
+  usage-shaped handler while unit 1.5 was unfinished. At integration it runs the real
+  `resource::desired_state_changed` and `EnqueueRequestForProviderConfig`, watching the
+  baseline's `example.com` ProviderConfigUsage.
 - `#![allow(dead_code)]` stays in `crossplane-runtime/src/lib.rs`: the remaining `todo!()`s are
   other units' (1.5, 1.6, 1.7, 1.8).
 
