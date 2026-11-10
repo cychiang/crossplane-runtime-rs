@@ -21,9 +21,10 @@ takes about 21 minutes (1279 to 1382s over four runs) on an arm64 Mac, most of i
 
 The machine must stay awake for the whole run. A sleep moves the wall clock past the 30s creation grace period, so
 the run that slept skips its `PendingExternalResource` events and their writes and compares as DIFFERENT. One run
-that crossed several maintenance sleeps took 7230s and lost two such events on the Go side. On macOS `parity.sh`
-holds the machine awake with `caffeinate`. Elsewhere, keep it awake yourself, and treat a run much longer than usual
-as suspect.
+that crossed an idle sleep, a lid-close sleep and many maintenance sleeps took 7230s and lost two such events on
+the Go side. On macOS `parity.sh` runs under `caffeinate`, which prevents idle sleep but not a lid close, and then
+reads the power log: if the machine slept during the run it prints `INVALID` and exits 3, whatever the diff said.
+Elsewhere, keep the machine awake yourself, and treat a run much longer than usual as suspect.
 
 A Go-against-Rust diff means something only because Go-against-Go diffs are empty. To check that, record more Go
 runs and diff them with no allowance file, as described under Commands.

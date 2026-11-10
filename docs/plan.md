@@ -75,4 +75,5 @@ beside chainsaw and the audit trace.
 
 ### Later
 
-Experimental Rust target in xp-provider-gen, once Phase 3 passes.
+Experimental Rust target in xp-provider-gen, once Phase 3 passes. Done on xp-provider-gen's local branch
+`feat/experimental-rust-target` (`init --rust`, one kind), not merged.
