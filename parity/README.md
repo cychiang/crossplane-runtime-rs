@@ -173,10 +173,11 @@ round's update or status write fails with 409 and its other write is never sent 
 are not compared, so that run has a write fewer. `scripts/pc-settle.py <run>` prints, per run, the smallest gap from
 the provider's last ProviderConfig write to the delete, and the tests with a ProviderConfig 409.
 
-The race is possible on both stacks, and its odds follow the provider's reconcile latency. Go's smallest gap is 31 to
-33ms (go-h to go-j). A Rust provider that opened a new HTTP connection on every reconcile finished the 30s
-grace-period chain about 40ms later than Go (`scripts/finalizer-lag.py`), its gap fell to 0 to 1ms, and 2 of 3 runs
-differed. A 2s `delayBeforeCleanup` covered that until the cause was fixed. With one shared connection pool the
+The race is possible on both stacks, and its odds follow the provider's reconcile latency. Go's smallest gap per run is 10 to
+34ms (go-e to go-j; 10ms in go-f, so Go comes close too). A Rust provider that opened a new HTTP connection on every
+reconcile finished the 30s grace-period chain about 40ms later than Go (`scripts/finalizer-lag.py`), its gap fell to
+0 to 1ms, and 2 of 3 runs differed (rust-5 and rust-6 against each of go-h, go-i and go-j: 3 differences; rust-4
+equal). A 2s `delayBeforeCleanup` covered that until the cause was fixed. With one shared connection pool the
 Rust gap is 12 to 29ms, and runs rust-nodelay-1 to 3 are each equal to go-h, go-i and go-j. If a run ever differs by
 one missing ProviderConfig write after a 409, rerun it and check `pc-settle.py`.
 

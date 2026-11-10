@@ -67,7 +67,7 @@ Checked equal, not listed above. `parity/scripts/go-checks.sh` runs each against
   search-path lookups, TCP connect) was inferred, not measured. About 6ms of excess over the
   chain was left, explained below. The excess lag had pushed Rust's last ProviderConfig writes into
   the cleanup window: without a cleanup delay, the gap from the last ProviderConfig
-  write to cleanup's delete was at least 31ms on Go (go-h to go-j) and as little as 0 to 1ms on
+  write to cleanup's delete was 10 to 34ms at its smallest per Go run (go-e to go-j) and as little as 0 to 1ms on
   Rust (rust-4 to rust-6), which had ProviderConfig 409s in five tests against one in go-h
   (`parity/scripts/pc-settle.py` and the audit). The single event intervals once used here
   (1 to 20ms) were too few samples to show the change.
