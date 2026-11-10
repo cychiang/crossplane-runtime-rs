@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crossplane_core::client::Client;
-use crossplane_core::errors::Result;
+use crossplane_core::errors::{Result, ResultExt, ignore_not_found};
+use crossplane_core::meta;
 use crossplane_core::resource::Kind;
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -31,19 +32,22 @@ const ERR_UPDATE_OBJECT: &str = "cannot update object";
 impl<K: Kind> Finalizer<K> for ApiFinalizer {
     fn add_finalizer<'a>(&'a self, obj: &'a mut K) -> BoxFuture<'a, Result<()>> {
         async move {
-            let _ = (&self.client, self.finalizer, obj, ERR_UPDATE_OBJECT);
-            // TODO (pkg/resource/api.go:165): present -> Ok; add; Update, wrapped.
-            todo!()
+            if meta::finalizer_exists(obj, self.finalizer) {
+                return Ok(());
+            }
+            meta::add_finalizer(obj, self.finalizer);
+            self.client.update(obj).await.wrap_err(ERR_UPDATE_OBJECT)
         }
         .boxed()
     }
 
     fn remove_finalizer<'a>(&'a self, obj: &'a mut K) -> BoxFuture<'a, Result<()>> {
         async move {
-            let _ = (&self.client, self.finalizer, obj);
-            // TODO (pkg/resource/api.go:176): absent -> Ok; remove; Update, NotFound ignored,
-            // wrapped.
-            todo!()
+            if !meta::finalizer_exists(obj, self.finalizer) {
+                return Ok(());
+            }
+            meta::remove_finalizer(obj, self.finalizer);
+            ignore_not_found(self.client.update(obj).await).wrap_err(ERR_UPDATE_OBJECT)
         }
         .boxed()
     }
