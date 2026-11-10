@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use crossplane_core::errors::Result;
 use crossplane_core::resource::{Kind, Object, ObjectType};
+use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use kube::core::GroupVersionKind;
@@ -24,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cache::InformerEvent;
 use crate::feature::Features;
 use crate::gate::Gate;
-use crate::manager::{Manager, Runnable};
+use crate::manager::{CACHE_SYNC_TIMEOUT, Manager, Runnable};
 use crate::ratelimiter::{ItemExponentialBackoff, RateLimiter};
 use crate::reconciler::managed::{ChangeLogger, MetricRecorder};
 use crate::reconciler::{Reconcile, Request};
@@ -125,14 +126,18 @@ struct EnqueueRequestForObject;
 
 impl<K: Kind> EventHandler<K> for EnqueueRequestForObject {
     fn requests(&self, event: &WatchEvent<'_, K>) -> Vec<Request> {
-        todo!("the key of the event's (new) object: {event:?}")
+        let obj: &dyn Object = match event {
+            WatchEvent::Create(o) | WatchEvent::Delete(o) => *o,
+            WatchEvent::Update { new, .. } => *new,
+        };
+        vec![obj.key()]
     }
 }
 
 /// One watch of a controller: a kind and the erased form of its typed handler.
 struct Source {
     object_type: ObjectType,
-    requests: Box<dyn Fn(&InformerEvent) -> Vec<Request> + Send + Sync>,
+    requests: Arc<dyn Fn(&InformerEvent) -> Vec<Request> + Send + Sync>,
 }
 
 impl Source {
@@ -140,11 +145,21 @@ impl Source {
     fn new<U: Kind>(handler: impl EventHandler<U>) -> Self {
         Self {
             object_type: ObjectType::of::<U>(),
-            requests: Box::new(move |event| {
-                let _ = (&handler, event);
-                // TODO: downcast each object of the event to U (a mismatch is a bug in Cache),
-                // build the WatchEvent<U>, return handler.requests(..).
-                todo!()
+            requests: Arc::new(move |event| {
+                fn typed<U: Kind>(o: &Arc<dyn Object>) -> &U {
+                    (**o)
+                        .downcast_ref::<U>()
+                        .unwrap_or_else(|| panic!("the cache sent {o:?} on a watch of {:?}", ObjectType::of::<U>()))
+                }
+                let event = match event {
+                    InformerEvent::Create(o) => WatchEvent::Create(typed::<U>(o)),
+                    InformerEvent::Update { old, new } => WatchEvent::Update {
+                        old: typed::<U>(old),
+                        new: typed::<U>(new),
+                    },
+                    InformerEvent::Delete(o) => WatchEvent::Delete(typed::<U>(o)),
+                };
+                handler.requests(&event)
             }),
         }
     }
@@ -239,21 +254,49 @@ struct Controller {
 impl Controller {
     /// Every source's informer events, filtered by the predicates and mapped by its handler,
     /// merged into one stream of keys. This is the only kube-facing half of a controller.
+    /// controller-runtime ANDs a watch's predicates, and `WithEventFilter`'s apply to every watch
+    /// (`pkg/builder/controller.go`).
     fn keys(&self) -> BoxStream<'static, Request> {
-        let _ = (
-            self.mgr.cache(),
-            &self.filters,
-            self.sources.iter().map(|s| (&s.object_type, &s.requests)),
-        );
-        // TODO: per source: cache.subscribe(object_type) -> keep events every filter passes
-        // (controller-runtime ANDs them) -> requests(event) -> flatten; then select_all.
-        todo!()
+        let cache = self.mgr.cache();
+        let streams = self.sources.iter().map(|source| {
+            let filters = self.filters.clone();
+            let requests = source.requests.clone();
+            let events = cache.subscribe(&source.object_type);
+            futures::stream::unfold(
+                events,
+                |mut events| async move { events.recv().await.map(|e| (e, events)) },
+            )
+            .filter(move |event| std::future::ready(passes(&filters, event)))
+            .flat_map(move |event| futures::stream::iter(requests(&event)))
+            .boxed()
+        });
+        futures::stream::select_all(streams).boxed()
     }
 }
 
+fn passes(filters: &[Arc<dyn Predicate>], event: &InformerEvent) -> bool {
+    filters.iter().all(|p| match event {
+        InformerEvent::Create(o) => p.create(&**o),
+        InformerEvent::Update { old, new } => p.update(&**old, &**new),
+        InformerEvent::Delete(o) => p.delete(&**o),
+    })
+}
+
 impl Runnable for Controller {
+    /// controller-runtime `Controller.Start`: start the watches, wait for their caches to sync,
+    /// then run the workers (`pkg/internal/controller/controller.go:340-400`).
     fn start(self: Box<Self>, shutdown: CancellationToken) -> BoxFuture<'static, Result<()>> {
         let keys = self.keys();
-        Box::pin(driver::run(self.name, keys, self.reconciler, self.options, shutdown))
+        let cache = self.mgr.cache();
+        let kinds: Vec<_> = self.sources.iter().map(|s| s.object_type.clone()).collect();
+        Box::pin(async move {
+            for kind in &kinds {
+                tokio::select! {
+                    () = shutdown.cancelled() => return Ok(()),
+                    synced = cache.wait_for_sync(kind, CACHE_SYNC_TIMEOUT) => synced?,
+                }
+            }
+            driver::run(self.name, keys, self.reconciler, self.options, shutdown).await
+        })
     }
 }

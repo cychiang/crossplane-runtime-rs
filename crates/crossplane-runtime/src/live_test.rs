@@ -334,3 +334,289 @@ async fn the_cache_serves_reads_and_follows_writes() {
     .await;
     cache.stop();
 }
+
+/// The baseline provider's kind, with an open spec and status so a test can write anything. Its
+/// CRD has a status subresource, which a status-only write needs.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MyType {
+    metadata: ObjectMeta,
+    spec: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<serde_json::Value>,
+}
+
+impl kube::Resource for MyType {
+    type DynamicType = ();
+    type Scope = kube::core::NamespaceResourceScope;
+
+    fn kind(_: &()) -> std::borrow::Cow<'_, str> {
+        "MyType".into()
+    }
+    fn group(_: &()) -> std::borrow::Cow<'_, str> {
+        "sample.example.com".into()
+    }
+    fn version(_: &()) -> std::borrow::Cow<'_, str> {
+        "v1alpha1".into()
+    }
+    fn plural(_: &()) -> std::borrow::Cow<'_, str> {
+        "mytypes".into()
+    }
+    fn meta(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+    fn meta_mut(&mut self) -> &mut ObjectMeta {
+        &mut self.metadata
+    }
+}
+
+/// Paused, so the installed Go provider only marks it paused.
+fn my_type(ns: &str, name: &str) -> MyType {
+    MyType {
+        metadata: ObjectMeta {
+            name: Some(name.into()),
+            namespace: Some(ns.into()),
+            annotations: Some([("crossplane.io/paused".to_owned(), "true".to_owned())].into()),
+            ..Default::default()
+        },
+        spec: serde_json::json!({"forProvider": {"configurableField": "a"}}),
+        status: None,
+    }
+}
+
+/// A copy of Go `resource.DesiredStateChanged` (`pkg/resource/predicates.go:55-69`) for this
+/// test, because `resource::predicates` belongs to unit 1.5 and is not filled in on this branch.
+struct DesiredStateChangedForTest;
+
+impl crate::controller::Predicate for DesiredStateChangedForTest {
+    fn update(&self, old: &dyn crossplane_core::resource::Object, new: &dyn crossplane_core::resource::Object) -> bool {
+        let annotations = |o: &dyn crossplane_core::resource::Object| {
+            let mut a = o.meta().annotations.clone().unwrap_or_default();
+            a.remove(crossplane_core::meta::ANNOTATION_KEY_EXTERNAL_CREATE_FAILED);
+            a.remove(crossplane_core::meta::ANNOTATION_KEY_EXTERNAL_CREATE_PENDING);
+            a
+        };
+        let labels = |o: &dyn crossplane_core::resource::Object| o.meta().labels.clone().unwrap_or_default();
+        annotations(old) != annotations(new)
+            || labels(old) != labels(new)
+            || old.meta().generation != new.meta().generation
+    }
+}
+
+/// Counts reconciles per object name.
+#[derive(Clone, Default)]
+struct Counting(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>);
+
+impl Counting {
+    fn of(&self, name: &str) -> usize {
+        self.0.lock().unwrap().get(name).copied().unwrap_or(0)
+    }
+}
+
+impl crate::reconciler::Reconcile for Counting {
+    fn reconcile<'a>(
+        &'a self,
+        req: &'a crate::reconciler::Request,
+    ) -> futures::future::BoxFuture<'a, crossplane_core::errors::Result<crate::reconciler::Outcome>> {
+        *self.0.lock().unwrap().entry(req.name.clone()).or_default() += 1;
+        async { Ok(crate::reconciler::Outcome::Done) }.boxed()
+    }
+}
+
+/// Maps every ConfigMap event to a reconcile of the MyType named in its `target` label, the shape
+/// of the ProviderConfig controller's `Watches(ProviderConfigUsage, EnqueueRequestForProviderConfig)`.
+struct ToTarget;
+
+impl crate::controller::EventHandler<ConfigMap> for ToTarget {
+    fn requests(&self, event: &crate::controller::WatchEvent<'_, ConfigMap>) -> Vec<crate::reconciler::Request> {
+        let cm = match event {
+            crate::controller::WatchEvent::Create(c) | crate::controller::WatchEvent::Delete(c) => *c,
+            crate::controller::WatchEvent::Update { new, .. } => *new,
+        };
+        let target = cm.metadata.labels.as_ref().and_then(|l| l.get("target"));
+        target
+            .map(|t| ObjectKey::namespaced(cm.metadata.namespace.clone().unwrap_or_default(), t.clone()))
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Get, change, update, again on a conflict: reads come from the cache, so a write can race the
+/// installed provider's status writes and get 409, as Go's cached reads do.
+async fn update_retrying(client: &dyn Client, key: &ObjectKey, change: impl Fn(&mut MyType)) {
+    for _ in 0..50 {
+        let mut obj: MyType = client.get_as(key).await.unwrap();
+        change(&mut obj);
+        match client.update(&mut obj).await {
+            Ok(()) => return,
+            Err(e) if e.is_conflict() => tokio::time::sleep(Duration::from_millis(50)).await,
+            Err(e) => panic!("update: {e}"),
+        }
+    }
+    panic!("update kept conflicting");
+}
+
+/// Waits until `count()` stops changing for `quiet`, so a later "did not change" is not read
+/// before the events have arrived.
+async fn settle(count: impl Fn() -> usize, quiet: Duration) -> usize {
+    let mut last = count();
+    loop {
+        tokio::time::sleep(quiet).await;
+        let now = count();
+        if now == last {
+            return now;
+        }
+        last = now;
+    }
+}
+
+#[tokio::test]
+async fn desired_state_changed_filters_status_writes_and_resyncs() {
+    use crate::controller::{self, ControllerOptions};
+    use crate::manager::{Manager, ManagerOptions};
+
+    let Some(config) = rest_config("desired_state_changed_filters_status_writes_and_resyncs").await else {
+        return;
+    };
+    let sync = Duration::from_secs(3);
+    let mgr = Manager::new(
+        config,
+        ManagerOptions {
+            sync_period: sync,
+            metrics_bind_address: "0".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let client = mgr.client();
+    let (filtered, control) = (Counting::default(), Counting::default());
+    controller::new_managed_by(&mgr)
+        .named("filtered")
+        .with_options(ControllerOptions::default())
+        .with_event_filter(DesiredStateChangedForTest)
+        .for_kind::<MyType>()
+        .watches::<ConfigMap>(ToTarget)
+        .complete(filtered.clone())
+        .unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let running = tokio::spawn({
+        let (mgr, stop) = (mgr.clone(), stop.clone());
+        async move { mgr.start(stop.cancelled_owned()).await }
+    });
+    controller::new_managed_by(&mgr)
+        .named("control")
+        .for_kind::<MyType>()
+        .complete(control.clone())
+        .expect("a controller added after start runs at once, as the safe-start gate needs");
+
+    let (filtered, control) = (&filtered, &control);
+    let client = &*client;
+    in_namespace(client, "builder", |ns| async move {
+        let quiet = Duration::from_millis(700);
+        let key = ObjectKey::namespaced(&ns, "a");
+        let mut obj = my_type(&ns, "a");
+        client.create(&mut obj).await.unwrap();
+        eventually("the create to reach both controllers", || async {
+            (filtered.of("a") >= 1 && control.of("a") >= 1).then_some(())
+        })
+        .await;
+        let base = settle(|| filtered.of("a"), quiet).await;
+        assert_eq!(base, 1, "the create triggered the filtered controller once");
+
+        let control_before = control.of("a");
+        let rv = loop {
+            let mut obj: MyType = client.get_as(&key).await.unwrap();
+            let mut status = obj.status.clone().unwrap_or_else(|| serde_json::json!({}));
+            status["atProvider"] = serde_json::json!({"configurableField": "observed"});
+            obj.status = Some(status);
+            match client.update_status(&mut obj).await {
+                Ok(()) => break obj.metadata.resource_version,
+                Err(e) if e.is_conflict() => continue,
+                Err(e) => panic!("status write: {e}"),
+            }
+        };
+        eventually("the status write in the cache", || async {
+            let got: MyType = client.get_as(&key).await.ok()?;
+            (got.metadata.resource_version >= rv).then_some(())
+        })
+        .await;
+        eventually("the control controller to see the status write", || async {
+            (control.of("a") > control_before).then_some(())
+        })
+        .await;
+        assert_eq!(
+            settle(|| filtered.of("a"), quiet).await,
+            1,
+            "a status-only write does not retrigger"
+        );
+
+        let control_before = control.of("a");
+        tokio::time::sleep(sync.mul_f64(1.2)).await;
+        let control_after = control.of("a");
+        let filtered_after = settle(|| filtered.of("a"), quiet).await;
+        eprintln!(
+            "resync window {:?}: control {control_before} -> {control_after}, filtered stays {filtered_after}",
+            sync.mul_f64(1.2)
+        );
+        assert!(
+            control_after > control_before,
+            "the resync reached the unfiltered controller"
+        );
+        assert_eq!(filtered_after, 1, "a resync does not trigger the filtered controller");
+
+        update_retrying(client, &key, |o| {
+            o.spec["forProvider"]["configurableField"] = serde_json::json!("b")
+        })
+        .await;
+        eventually("a spec change to trigger", || async {
+            (filtered.of("a") == 2).then_some(())
+        })
+        .await;
+
+        update_retrying(client, &key, |o| {
+            o.metadata
+                .annotations
+                .get_or_insert_default()
+                .insert("xprs/touch".into(), "1".into());
+        })
+        .await;
+        eventually("an annotation change to trigger", || async {
+            (filtered.of("a") == 3).then_some(())
+        })
+        .await;
+
+        update_retrying(client, &key, |o| {
+            o.metadata.annotations.get_or_insert_default().insert(
+                crossplane_core::meta::ANNOTATION_KEY_EXTERNAL_CREATE_PENDING.into(),
+                "x".into(),
+            );
+        })
+        .await;
+        tokio::time::sleep(quiet).await;
+        assert_eq!(
+            settle(|| filtered.of("a"), quiet).await,
+            3,
+            "the create-pending annotation is ignored"
+        );
+
+        let mut trigger = config_map(&ns, "trigger");
+        trigger.metadata.labels = Some([("target".to_owned(), "a".to_owned())].into());
+        client.create(&mut trigger).await.unwrap();
+        eventually("a watched ConfigMap mapped to its MyType", || async {
+            (filtered.of("a") == 4).then_some(())
+        })
+        .await;
+        assert_eq!(
+            filtered.of("trigger"),
+            0,
+            "the handler's mapping, not the ConfigMap's own key"
+        );
+        eprintln!(
+            "filtered {:?}, control {:?}",
+            filtered.0.lock().unwrap(),
+            control.0.lock().unwrap()
+        );
+    })
+    .await;
+    stop.cancel();
+    running.await.unwrap().expect("the manager stops cleanly");
+}

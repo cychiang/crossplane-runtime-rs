@@ -3,20 +3,27 @@
 //! before and after start, because the safe-start gate adds controllers late.
 
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crossplane_core::client::Client;
 use crossplane_core::errors::{Error, Result};
 use futures::future::BoxFuture;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::cache::Cache;
-use crate::event::{ApiRecorder, MAX_QUEUED_EVENTS, Recorder};
+use crate::clock::SystemClock;
+use crate::event::{ApiRecorder, KubeEventSink, MAX_QUEUED_EVENTS, Recorder};
 use crate::kube_client::{self, KubeClient};
 use crate::ratelimiter::Throttle;
 use k8s_openapi::api::core::v1::Event as CoreEvent;
+use leader_election::Elector;
+
+#[path = "leader_election.rs"]
+mod leader_election;
 
 /// How to reach the API server, and how fast. [`RestConfig::infer`] is the only public
 /// constructor and [`Manager::new`] the only consumer, so every request in the process carries
@@ -183,9 +190,11 @@ struct Inner {
     client: Arc<dyn Client>,
     cache: Cache,
     kube: kube::Client,
+    rest: RestConfig,
     options: ManagerOptions,
     events: mpsc::Sender<CoreEvent>,
     metrics: prometheus::Registry,
+    metrics_address: OnceLock<SocketAddr>,
     runnables: mpsc::UnboundedSender<Box<dyn Runnable>>,
     /// Taken by `start`.
     pending: Mutex<Option<Pending>>,
@@ -196,10 +205,13 @@ struct Pending {
     events: mpsc::Receiver<CoreEvent>,
 }
 
+/// controller-runtime's default `CacheSyncTimeout` (`pkg/controller/controller.go:248-250`).
+pub(crate) const CACHE_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+
 impl Manager {
     /// Go `ctrl.NewManager(cfg, opts)`.
     pub fn new(config: RestConfig, options: ManagerOptions) -> Result<Self> {
-        let kube = config.into_kube_client()?;
+        let kube = config.clone().into_kube_client()?;
         let cache = Cache::new(kube.clone(), options.sync_period);
         let (events, events_rx) = mpsc::channel(MAX_QUEUED_EVENTS);
         let (runnables, runnables_rx) = mpsc::unbounded_channel();
@@ -208,9 +220,11 @@ impl Manager {
                 client: Arc::new(KubeClient::new(kube.clone(), cache.clone())),
                 cache,
                 kube,
+                rest: config,
                 options,
                 events,
                 metrics: prometheus::Registry::new(),
+                metrics_address: OnceLock::new(),
                 runnables,
                 pending: Mutex::new(Some(Pending {
                     runnables: runnables_rx,
@@ -234,37 +248,257 @@ impl Manager {
         Arc::new(ApiRecorder::new(name, self.inner.events.clone()))
     }
 
-    /// Go `metrics.Registry.MustRegister`.
+    /// Go `metrics.Registry.MustRegister`, returning the error instead of panicking.
     pub fn register_metrics(&self, collector: Box<dyn prometheus::core::Collector>) -> Result<()> {
-        let _ = (&self.inner.metrics, collector);
-        todo!()
+        self.inner.metrics.register(collector).map_err(Error::foreign)
+    }
+
+    /// Where the metrics endpoint listens, once `start` has bound it.
+    pub(crate) fn metrics_address(&self) -> Option<SocketAddr> {
+        self.inner.metrics_address.get().copied()
     }
 
     /// Go `mgr.Add(r)`. Before `start` the runnable waits for it; after, it starts at once.
     pub fn add(&self, runnable: impl Runnable) -> Result<()> {
-        let _ = (&self.inner.runnables, Box::new(runnable) as Box<dyn Runnable>);
-        todo!("send; an error when the manager has stopped")
+        self.inner
+            .runnables
+            .send(Box::new(runnable))
+            .map_err(|_| Error::new("can't accept new runnables as stop procedure is already engaged"))
     }
 
-    /// Go `mgr.Start(ctx)`: run every runnable (leader-gated ones after acquiring the lease),
-    /// keep accepting late adds, and on `shutdown` cancel and wait up to
-    /// `graceful_shutdown_timeout`. An error when called twice.
+    /// Go `mgr.Start(ctx)`: serve metrics, run every runnable (leader-gated ones after acquiring
+    /// the lease), keep accepting late adds, and on `shutdown` cancel and wait up to
+    /// `graceful_shutdown_timeout`. A runnable's error stops the manager the same way and is
+    /// returned. Losing the lease returns "leader election lost" without waiting. An error when
+    /// called twice.
     pub async fn start(&self, shutdown: impl Future<Output = ()> + Send) -> Result<()> {
-        let _ = (
-            &self.inner.pending,
-            &self.inner.options,
-            &self.inner.kube,
-            crate::event::run_broadcaster,
-        );
-        shutdown.await;
-        todo!()
+        let pending = self.inner.pending.lock().unwrap().take();
+        let Some(Pending {
+            runnables: mut added,
+            events,
+        }) = pending
+        else {
+            return Err(Error::new("manager already started"));
+        };
+        let stop = CancellationToken::new();
+        let stop_events = CancellationToken::new();
+        let broadcaster = tokio::spawn(crate::event::run_broadcaster(
+            Arc::new(KubeEventSink::new(self.inner.kube.clone())),
+            events,
+            Arc::new(SystemClock),
+            crate::event::DEFAULT_SLEEP_DURATION,
+            stop_events.clone(),
+        ));
+        let result = self.run(&mut added, shutdown, &stop).await;
+        added.close();
+        self.inner.cache.stop();
+        stop_events.cancel();
+        let _ = broadcaster.await;
+        result
+    }
+
+    async fn run(
+        &self,
+        added: &mut mpsc::UnboundedReceiver<Box<dyn Runnable>>,
+        shutdown: impl Future<Output = ()> + Send,
+        stop: &CancellationToken,
+    ) -> Result<()> {
+        let mut running = JoinSet::new();
+        if let Some(server) = self.bind_metrics().await? {
+            running.spawn(server.serve(self.inner.metrics.clone(), stop.clone()));
+        }
+        let (leading_tx, leading) = watch::channel(self.inner.options.leader_election.is_none());
+        let lost = CancellationToken::new();
+        if let Some(le) = &self.inner.options.leader_election {
+            let mut elector = self.elector(le)?;
+            let (stop, lost) = (stop.clone(), lost.clone());
+            tokio::spawn(async move {
+                if elector.acquire(&stop).await {
+                    leading_tx.send_replace(true);
+                    if elector.renew(&stop).await {
+                        lost.cancel();
+                    }
+                }
+            });
+        }
+
+        let mut shutdown = std::pin::pin!(shutdown);
+        let outcome = loop {
+            tokio::select! {
+                () = &mut shutdown => break Ok(()),
+                () = lost.cancelled() => return Err(Error::new("leader election lost")),
+                Some(runnable) = added.recv() => {
+                    running.spawn(start_runnable(runnable, leading.clone(), stop.clone()));
+                }
+                Some(joined) = running.join_next() => match joined {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => break Err(err),
+                    Err(join) => break Err(Error::new(format!("runnable panicked: {join}"))),
+                },
+            }
+        };
+
+        stop.cancel();
+        let timeout = self.inner.options.graceful_shutdown_timeout;
+        let drained = tokio::time::timeout(timeout, async { while running.join_next().await.is_some() {} }).await;
+        match (outcome, drained) {
+            (Err(err), _) => Err(err),
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(_)) => Err(Error::new(format!(
+                "failed waiting for all runnables to end within grace period of {}: context deadline exceeded",
+                go_duration(timeout)
+            ))),
+        }
+    }
+
+    /// controller-runtime `NewResourceLock`: its own client, with `/leader-election` appended to
+    /// the User-Agent and a request timeout of half the renew deadline, at least a second.
+    fn elector(&self, le: &LeaderElection) -> Result<Elector> {
+        let namespace = match &le.namespace {
+            Some(ns) => ns.clone(),
+            None => leader_election::in_cluster_namespace()?,
+        };
+        let mut rest = self.inner.rest.clone().with_user_agent_suffix("leader-election");
+        rest.kube.read_timeout = Some((le.renew_deadline / 2).max(Duration::from_secs(1)));
+        let identity = leader_election::identity();
+        let recorder = ApiRecorder::new(&identity, self.inner.events.clone());
+        Elector::new(
+            rest.into_kube_client()?,
+            &namespace,
+            &le.id,
+            identity,
+            le.lease_duration,
+            le.renew_deadline,
+            le.retry_period,
+            Some(recorder),
+        )
+    }
+
+    async fn bind_metrics(&self) -> Result<Option<MetricsServer>> {
+        let address = &self.inner.options.metrics_bind_address;
+        if address == "0" || address.is_empty() {
+            return Ok(None);
+        }
+        let address = if address.starts_with(':') {
+            format!("0.0.0.0{address}")
+        } else {
+            address.clone()
+        };
+        let listener = tokio::net::TcpListener::bind(&address)
+            .await
+            .map_err(|e| Error::foreign(e).wrap("failed to start metrics server: failed to create listener"))?;
+        let _ = self
+            .inner
+            .metrics_address
+            .set(listener.local_addr().map_err(Error::foreign)?);
+        Ok(Some(MetricsServer { listener }))
+    }
+}
+
+async fn start_runnable(
+    runnable: Box<dyn Runnable>,
+    mut leading: watch::Receiver<bool>,
+    stop: CancellationToken,
+) -> Result<()> {
+    if runnable.needs_leader_election() {
+        tokio::select! {
+            () = stop.cancelled() => return Ok(()),
+            _ = leading.wait_for(|l| *l) => {}
+        }
+    }
+    runnable.start(stop).await
+}
+
+/// Go's `time.Duration.String()` for the whole-second values the manager prints.
+fn go_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    match (secs / 3600, secs % 3600 / 60, secs % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m{s}s"),
+        (h, m, s) => format!("{h}h{m}m{s}s"),
+    }
+}
+
+/// controller-runtime's metrics server: Prometheus text on `/metrics`, 404 elsewhere
+/// (`pkg/metrics/server/server.go`).
+struct MetricsServer {
+    listener: tokio::net::TcpListener,
+}
+
+impl MetricsServer {
+    async fn serve(self, registry: prometheus::Registry, stop: CancellationToken) -> Result<()> {
+        loop {
+            let (stream, _) = tokio::select! {
+                () = stop.cancelled() => return Ok(()),
+                accepted = self.listener.accept() => match accepted {
+                    Ok(accepted) => accepted,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "metrics server accept failed");
+                        continue;
+                    }
+                },
+            };
+            let registry = registry.clone();
+            let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let response = metrics_response(&registry, req.method(), req.uri().path());
+                async move { Ok::<_, std::convert::Infallible>(response) }
+            });
+            tokio::spawn(async move {
+                let io = hyper_util::rt::TokioIo::new(stream);
+                if let Err(err) = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(io, service)
+                    .await
+                {
+                    tracing::debug!(error = %err, "metrics connection ended");
+                }
+            });
+        }
+    }
+}
+
+fn metrics_response(
+    registry: &prometheus::Registry,
+    method: &http::Method,
+    path: &str,
+) -> hyper::Response<http_body_util::Full<hyper::body::Bytes>> {
+    use prometheus::Encoder;
+    let text = |status: u16, body: Vec<u8>, content_type: &str| {
+        hyper::Response::builder()
+            .status(status)
+            .header(http::header::CONTENT_TYPE, content_type)
+            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+            .expect("a valid response")
+    };
+    if path != "/metrics" || (method != http::Method::GET && method != http::Method::HEAD) {
+        return text(404, b"404 page not found\n".to_vec(), "text/plain; charset=utf-8");
+    }
+    let encoder = prometheus::TextEncoder::new();
+    let mut body = Vec::new();
+    match encoder.encode(&registry.gather(), &mut body) {
+        Ok(()) => text(200, body, encoder.format_type()),
+        Err(err) => text(500, err.to_string().into_bytes(), "text/plain; charset=utf-8"),
     }
 }
 
 /// Go `ctrl.SetupSignalHandler()`: resolves on the first SIGINT or SIGTERM. A second one exits the
-/// process with status 1.
+/// process with status 1 (`pkg/manager/signals/signal.go:27-45`).
 pub async fn setup_signal_handler() {
-    todo!("tokio::signal::unix; spawn second-signal exit(1)")
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else {
+        tracing::error!("cannot install signal handlers");
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+        std::process::exit(1);
+    });
 }
 
 #[cfg(test)]
