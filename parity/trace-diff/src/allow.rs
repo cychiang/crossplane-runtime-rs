@@ -13,6 +13,8 @@ pub struct Allowance {
     pub a: Option<String>,
     #[serde(default)]
     pub b: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
     pub reason: String,
 }
 
@@ -23,6 +25,7 @@ impl Allowance {
             && glob(&self.key, &d.key)
             && self.a.as_deref().is_none_or(|p| glob(p, &d.a))
             && self.b.as_deref().is_none_or(|p| glob(p, &d.b))
+            && self.detail.as_deref().is_none_or(|p| !d.detail.is_empty() && d.detail.iter().all(|line| glob(p, line)))
     }
 }
 
@@ -76,6 +79,23 @@ mod tests {
         assert!(!glob("#* patch*", "#3 update status"));
         assert!(glob("a*b*c", "abc"));
         assert!(!glob("a*a", "a"));
+    }
+
+    #[test]
+    fn a_detail_glob_must_match_every_changed_path() {
+        let al = &parse(r#"{"layer":"audit","key":"*","kind":"changed","detail":".status: * -> (absent)","reason":"r"}"#).unwrap()[0];
+        let d = |detail: &[&str]| Difference {
+            layer: Layer::Audit,
+            key: "g/r ns/n".into(),
+            kind: Kind::Changed,
+            a: "#1 update".into(),
+            b: "#1 update".into(),
+            detail: detail.iter().map(|s| s.to_string()).collect(),
+        };
+        assert!(al.matches(&d(&[".status: {} -> (absent)"])));
+        assert!(!al.matches(&d(&[".status: {} -> (absent)", r#".metadata.finalizers[0]: "a" -> "b""#])));
+        assert!(!al.matches(&d(&[".status.conditions[0].reason: \"Creating\" -> \"Available\""])));
+        assert!(!al.matches(&d(&[])));
     }
 
     #[test]

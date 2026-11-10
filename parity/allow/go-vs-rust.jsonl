@@ -1,0 +1,4 @@
+# Differences between the Go baseline and the Rust provider that are accepted, each with its reason.
+# See DIVERGENCES.md for the full entry.
+{"layer": "audit", "key": "sample.example.com/mytypes *", "kind": "changed", "a": "#* update", "b": "#* update", "detail": ".status: * -> (absent)", "reason": "Go marshals a zero-value status struct into the body of a metadata update; Rust omits an absent status. The API server ignores status on a write to the main resource when the CRD has a status subresource (checked live: a replace with status.users=42 stored status {})."}
+{"layer": "audit", "key": "example.com/providerconfigs *", "kind": "changed", "a": "#* update", "b": "#* update", "detail": ".status: * -> (absent)", "reason": "Same as for mytypes: a zero-value status in the body of a metadata update, ignored by the API server."}
