@@ -18,8 +18,6 @@ use provider_sample::provider;
 /// Go `internal/version/version.go`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The flags of Go's kingpin app, flag for flag. Each kingpin bool is `--[no-]<name>`, so each
-/// bool here has a hidden `--no-<name>` twin and the last one given wins.
 #[derive(Parser, Debug)]
 #[command(
     about = "provider-baseline support for Crossplane.",

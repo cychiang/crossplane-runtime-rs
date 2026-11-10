@@ -181,8 +181,6 @@ async fn the_name_is_path_escaped_as_go_escapes_it() {
     assert_eq!(seen[0].1, "/things/a%20b%2Fc%3Fd%3Be%2Cf%25$&+:=@~");
 }
 
-/// `connect` builds a `Client` on every reconcile. The clients must share one connection pool,
-/// or each reconcile opens a new TCP connection to the external service.
 #[tokio::test]
 async fn clients_from_new_share_one_connection() {
     use std::sync::atomic::{AtomicUsize, Ordering};

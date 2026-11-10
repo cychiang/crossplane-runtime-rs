@@ -5,8 +5,6 @@ use crossplane_core::duration;
 
 use super::*;
 
-/// The shape a provider's `Args` has: a bool with a `--no-` twin, a bool that defaults on, an
-/// explicit env var and a derived one.
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(short = 'd', long, value_parser = go_bool, overrides_with = "no_debug")]
