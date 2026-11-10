@@ -3,7 +3,7 @@
 //! The client of the fake external service under `parity/fake-external`. Its status handling and
 //! error texts are the parity contract (`parity/README.md`), so they copy Go's.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use crossplane_core::errors::{Error, Result};
@@ -19,6 +19,13 @@ use crate::apis::v1alpha1::ProviderConfigSpec;
 
 /// Go's `http.Client{Timeout: 10 * time.Second}`: the whole exchange, body included.
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+type Http = HttpClient<HttpConnector, Full<Bytes>>;
+
+/// One connection pool for the whole process, as Go's `http.Client` shares
+/// `http.DefaultTransport`. `connect` runs on every reconcile, so a pool per client
+/// would open a new connection each time.
+static HTTP: LazyLock<Http> = LazyLock::new(|| HttpClient::builder(TokioExecutor::new()).build_http());
 
 /// What `Client::new` gets from the resolved ProviderConfig.
 pub struct ClientConfig {
@@ -37,14 +44,20 @@ pub struct Thing {
 /// Talks to the external API this provider manages.
 pub struct Client {
     endpoint: String,
-    http: HttpClient<HttpConnector, Full<Bytes>>,
+    http: Http,
 }
 
 impl Client {
     pub async fn new(_cfg: ClientConfig) -> Result<Self> {
-        Ok(Self::with_endpoint(super::options::endpoint()))
+        Ok(Self {
+            endpoint: super::options::endpoint(),
+            http: HTTP.clone(),
+        })
     }
 
+    /// A client with its own connection pool, for a stub server in a test. A pooled
+    /// connection is bound to the runtime that opened it, and each test has its own runtime.
+    #[cfg(test)]
     fn with_endpoint(endpoint: String) -> Self {
         Self {
             endpoint,
