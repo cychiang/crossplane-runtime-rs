@@ -16,7 +16,14 @@ and the Rust template xpkg, brings up the kind cluster, installs the Go provider
 the Rust provider and records run `parity-rust`, then runs `trace-diff` on the two with `allow/go-vs-rust.jsonl`. It
 prints the differ's report and exits with its status: 0 when the runs are equal apart from the allowances, 1 when they
 differ. It exits 1 without diffing when the Go run fails a scenario. The cluster stays up with the Rust provider
-installed; `parity/scripts/down.sh` deletes it. From a deleted cluster, with warm Go, Cargo and Docker build caches, it took 23 minutes (1382s) on an arm64 Mac, most of it the two runs of fifteen scenarios.
+installed; `parity/scripts/down.sh` deletes it. From a deleted cluster, with warm Go, Cargo and Docker build caches, it
+takes about 21 minutes (1279 to 1382s over four runs) on an arm64 Mac, most of it the two runs of fifteen scenarios.
+
+The machine must stay awake for the whole run. A sleep moves the wall clock past the 30s creation grace period, so
+the run that slept skips its `PendingExternalResource` events and their writes and compares as DIFFERENT. One run
+that crossed several maintenance sleeps took 7230s and lost two such events on the Go side. On macOS `parity.sh`
+holds the machine awake with `caffeinate`. Elsewhere, keep it awake yourself, and treat a run much longer than usual
+as suspect.
 
 A Go-against-Rust diff means something only because Go-against-Go diffs are empty. To check that, record more Go
 runs and diff them with no allowance file, as described under Commands.

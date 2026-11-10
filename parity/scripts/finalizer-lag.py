@@ -16,7 +16,7 @@ for run in sys.argv[1:]:
     for line in open(f'parity/.work/runs/{run}/audit-raw.jsonl'):
         e = json.loads(line); o = e.get('objectRef', {})
         if o.get('resource') != 'mytypes' or e.get('responseStatus', {}).get('code', 0) >= 300: continue
-        who = 'p' if 'provider' in e['user']['username'] else 's'
+        who = 'p' if 'provider' in e.get('user', {}).get('username', '') else 's'
         ev[o['namespace']].append((ts(e['requestReceivedTimestamp']), who, e['verb'], o.get('subresource')))
     out = []
     for ns, xs in sorted(ev.items()):

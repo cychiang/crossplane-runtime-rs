@@ -10,7 +10,14 @@
 #
 # TEMPLATE_DIR names the provider-template-rs checkout (default: a sibling of
 # this repository).
+#
+# On macOS the script holds the machine awake with caffeinate. A sleep moves
+# the wall clock past the 30s creation grace period, so a run that slept
+# compares as DIFFERENT for reasons neither provider controls.
 set -euo pipefail
+if [ -z "${PARITY_AWAKE:-}" ] && command -v caffeinate >/dev/null; then
+  PARITY_AWAKE=1 exec caffeinate -ims "$0" "$@"
+fi
 source "$(dirname "$0")/lib.sh"
 dir=$(dirname "$0")
 template=$(cd "${TEMPLATE_DIR:-$PARITY/../../provider-template-rs}" && pwd)

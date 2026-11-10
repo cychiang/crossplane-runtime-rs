@@ -17,7 +17,7 @@ for run in sys.argv[1:]:
         e = json.loads(line); o = e.get('objectRef', {}); ns = o.get('namespace')
         if not ns: continue
         code = e.get('responseStatus', {}).get('code', 0)
-        who = 'p' if 'provider' in e['user']['username'] else 's'
+        who = 'p' if 'provider' in e.get('user', {}).get('username', '') else 's'
         if who == 'p' and code == 409 and o.get('resource') == 'providerconfigs':
             conflicts.add(ns.removeprefix('parity-'))
         if code < 300:
