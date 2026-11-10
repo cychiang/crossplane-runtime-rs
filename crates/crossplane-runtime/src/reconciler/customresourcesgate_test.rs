@@ -449,3 +449,20 @@ fn the_annotation_is_removed_alone_when_it_is_the_only_one() {
     transform_strip_crd_schema(&mut c);
     assert_eq!(c.metadata.annotations, Some(BTreeMap::new()));
 }
+
+#[tokio::test]
+async fn gvks_are_logged_as_go_prints_them() {
+    let established = vec![condition("Established", "True")];
+    let served = with_conditions(crd(vec![version("v1", true)]), established);
+    let key = ObjectKey::cluster("testresources.example.com");
+    let r = Reconciler::new(client_returning(served), Arc::new(RecordingGate::default()));
+    let (_, logged) = crate::logging::capture(r.reconcile(&key)).await;
+    assert!(logged.contains("DEBUG"), "{logged}");
+    assert!(logged.contains(r#"gvk=example.com/v1, Kind=TestResource"#), "{logged}");
+    assert!(logged.contains("gvk is ready"), "{logged}");
+
+    let unready = with_conditions(crd(vec![version("v1", true)]), vec![condition("Established", "False")]);
+    let r = Reconciler::new(client_returning(unready), Arc::new(RecordingGate::default()));
+    let (_, logged) = crate::logging::capture(r.reconcile(&key)).await;
+    assert!(logged.contains("gvk is not ready"), "{logged}");
+}

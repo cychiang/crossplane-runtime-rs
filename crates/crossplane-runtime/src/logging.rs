@@ -1,7 +1,30 @@
 //! Go threads a `logging.Logger` through options. Here the global `tracing` subscriber does the
 //! job and each controller attaches its name as a span field, so no option carries a logger.
 
+use std::fmt;
+
+use k8s_openapi::jiff::Timestamp;
 use tracing_subscriber::EnvFilter;
+
+use crate::reconciler::Request;
+
+/// Go logs `request` as a JSON object, `{"name":"...","namespace":"..."}`.
+pub(crate) struct RequestFields<'a>(pub &'a Request);
+
+impl fmt::Display for RequestFields<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let json = serde_json::json!({
+            "name": self.0.name,
+            "namespace": self.0.namespace.as_deref().unwrap_or_default(),
+        });
+        write!(f, "{json}")
+    }
+}
+
+/// Go logs a `time.Time` or `metav1.Time` field as RFC 3339 to the second, in UTC.
+pub(crate) fn rfc3339(ts: Timestamp) -> String {
+    Timestamp::from_second(ts.as_second()).unwrap_or(ts).to_string()
+}
 
 /// `--debug` selects the pretty format at `debug`; otherwise JSON at `info`. `RUST_LOG` overrides
 /// the level. Panics when a global subscriber is already set.
@@ -24,6 +47,39 @@ fn default_filter(debug: bool) -> &'static str {
     } else {
         "info"
     }
+}
+
+/// Runs `fut` under a debug-level subscriber and returns what it logged. The subscriber is
+/// thread-local, so the test must run on a current-thread runtime, which `#[tokio::test]` gives.
+#[cfg(test)]
+pub(crate) async fn capture<F: std::future::Future>(fut: F) -> (F::Output, String) {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let sink = Sink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let out = fut.await;
+    let logged = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+    (out, logged)
 }
 
 #[cfg(test)]

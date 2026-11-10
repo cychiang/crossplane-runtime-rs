@@ -42,6 +42,8 @@ use crossplane_core::v2::{Condition, ConnectionDetails};
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use tokio::time::Instant;
+use tracing::Instrument;
+use tracing::field::Empty;
 
 pub use self::changelog::{ChangeLogEntry, ChangeLogger, GrpcChangeLogger, NopChangeLogger, OperationType};
 pub use self::collaborators::{
@@ -58,6 +60,7 @@ pub use self::metrics::{MetricRecorder, MetricSubject, MrMetricRecorder, NopMetr
 use self::policy::{ActionSet, PolicyResolver, default_supported_management_policies};
 use crate::clock::{Clock, SystemClock};
 use crate::event::{Event, NopRecorder, Recorder};
+use crate::logging;
 use crate::reconciler::deadline::bounded;
 use crate::reconciler::{Outcome, Reconcile, Request, silently_requeue_on_conflict};
 use crate::resource::{ApiFinalizer, Finalizer};
@@ -374,8 +377,21 @@ impl<M: Managed> Reconcile for Reconciler<M> {
                 external: start + self.timing.timeout,
                 kubernetes: start + self.timing.timeout + self.timing.grace,
             };
-            // X1 (R:922).
-            silently_requeue_on_conflict(self.run(req, deadlines).await)
+            let span = tracing::info_span!(
+                "reconcile",
+                request = %logging::RequestFields(req),
+                uid = Empty,
+                version = Empty,
+                "external-name" = Empty,
+                "deletion-timestamp" = Empty,
+            );
+            async {
+                tracing::debug!("Reconciling");
+                // X1 (R:922).
+                silently_requeue_on_conflict(self.run(req, deadlines).await)
+            }
+            .instrument(span)
+            .await
         }
         .boxed()
     }
@@ -387,9 +403,19 @@ impl<M: Managed> Reconciler<M> {
         // B01, B02
         let mut mg = match bounded(deadlines.kubernetes, self.client.get_as::<M>(req)).await {
             Ok(mg) => mg,
-            Err(e) if e.is_not_found() => return Ok(Outcome::Done),
-            Err(e) => return Err(e.wrap(ERR_GET_MANAGED)),
+            Err(e) => {
+                tracing::debug!(error = %e, "Cannot get managed resource");
+                return if e.is_not_found() {
+                    Ok(Outcome::Done)
+                } else {
+                    Err(e.wrap(ERR_GET_MANAGED))
+                };
+            }
         };
+        let span = tracing::Span::current();
+        span.record("uid", mg.meta().uid.as_deref().unwrap_or_default());
+        span.record("version", mg.meta().resource_version.as_deref().unwrap_or_default());
+        span.record("external-name", meta::external_name(&mg));
         // X6
         self.metrics.record_first_time_reconciled(&self.subject(&mg));
         // X7
@@ -405,6 +431,10 @@ impl<M: Managed> Reconciler<M> {
         // B03. The status write does not go through `Run::finish`, so a paused resource never
         // records a reconcile-request token.
         if meta::is_paused(&mg) || policy.is_paused() {
+            tracing::debug!(
+                annotation = meta::ANNOTATION_KEY_RECONCILIATION_PAUSED,
+                "{MSG_RECONCILIATION_PAUSED}"
+            );
             record.event(
                 &mg,
                 Event::normal(reason::RECONCILIATION_PAUSED, MSG_RECONCILIATION_PAUSED)
@@ -421,6 +451,7 @@ impl<M: Managed> Reconciler<M> {
         // updates in between.
         let token = match meta::reconcile_request(&mg) {
             Some(t) if M::TRACKS_RECONCILE_REQUESTS && mg.last_handled_reconcile_at() != t => {
+                tracing::debug!(token = t, "Processing reconcile request");
                 record.event(
                     &mg,
                     Event::normal(reason::RECONCILE_REQUEST_HANDLED, MSG_RECONCILE_REQUEST_HANDLED)
@@ -464,6 +495,12 @@ impl<M: Managed> Reconciler<M> {
     fn poll(&self, mg: &M) -> Duration {
         (self.poll_interval_hook)(mg, self.effective_poll_interval(mg))
     }
+
+    /// Go logs `time.Now().Add(reconcileAfter)` as `requeue-after`.
+    fn requeue_after(&self, poll: Duration) -> String {
+        let now = self.clock.now();
+        logging::rfc3339(now.checked_add(poll).unwrap_or(now))
+    }
 }
 
 /// One reconcile after the pause check: the per-run state Go keeps in locals of `Reconcile`.
@@ -495,6 +532,7 @@ impl<M: Managed> Run<'_, M> {
     async fn reconcile(mut self) -> Result<Outcome> {
         step!(self.validate_policy().await);
         if meta::was_deleted(&self.mg) && !self.policy.should_delete() {
+            self.record_deletion_timestamp();
             return self.unpublish_and_remove_finalizer(&ConnectionDetails::new()).await;
         }
         step!(self.initialize().await);
@@ -515,6 +553,7 @@ impl<M: Managed> Run<'_, M> {
         // every change log entry of this run.
         let pre_op = self.mg.clone();
         if meta::was_deleted(&self.mg) {
+            self.record_deletion_timestamp();
             return self.delete_external(ext, &obs, &pre_op).await;
         }
         step!(self.publish_observed_and_add_finalizer(&obs).await);
@@ -527,7 +566,7 @@ impl<M: Managed> Run<'_, M> {
         }
         if !obs.resource_exists {
             // B44 (R:1517-1523)
-            return self.succeed_and_poll().await;
+            return self.succeed_and_poll("Resource does not exist so skip update").await;
         }
         // S6
         if !obs.diff.is_empty() {
@@ -535,7 +574,9 @@ impl<M: Managed> Run<'_, M> {
         }
         if !self.policy.should_update() {
             // B45 (R:1531-1536)
-            return self.succeed_and_poll().await;
+            return self
+                .succeed_and_poll("Skipping update due to managementPolicies. Reconciliation succeeded")
+                .await;
         }
         self.update_external(ext, &pre_op).await
     }
@@ -571,10 +612,18 @@ impl<M: Managed> Run<'_, M> {
         self.report(event, conditions, Outcome::Requeue).await
     }
 
-    async fn succeed_and_poll(&mut self) -> Result<Outcome> {
+    async fn succeed_and_poll(&mut self, log: &str) -> Result<Outcome> {
         let poll = self.r.poll(&self.mg);
+        tracing::debug!("requeue-after" = %self.r.requeue_after(poll), "{log}");
         self.report(None, vec![Condition::reconcile_success()], Outcome::RequeueAfter(poll))
             .await
+    }
+
+    /// Go rebinds its logger with `deletion-timestamp` on both delete paths (`R:1033`, `R:1232`).
+    fn record_deletion_timestamp(&self) {
+        if let Some(ts) = &self.mg.meta().deletion_timestamp {
+            tracing::Span::current().record("deletion-timestamp", logging::rfc3339(ts.0));
+        }
     }
 
     /// A failed send is logged and never changes the outcome (`R:1252-1254`).
@@ -601,6 +650,7 @@ impl<M: Managed> Run<'_, M> {
         let Err(message) = self.policy.validate() else {
             return ControlFlow::Continue(());
         };
+        tracing::debug!("{message}");
         let e = Error::new(message);
         ControlFlow::Break(
             self.report(
@@ -619,6 +669,7 @@ impl<M: Managed> Run<'_, M> {
         let k8s = self.deadlines.kubernetes;
         // B06, B07 / B25, B26
         if let Err(e) = bounded(k8s, self.r.publisher.unpublish_connection(&self.mg, details)).await {
+            tracing::debug!(error = %e, "Cannot unpublish connection details");
             return self
                 .failed(
                     &e,
@@ -629,12 +680,14 @@ impl<M: Managed> Run<'_, M> {
         }
         // B08, B09 / B27, B28: no event.
         if let Err(e) = bounded(k8s, self.r.finalizer.remove_finalizer(&mut self.mg)).await {
+            tracing::debug!(error = %e, "Cannot remove managed resource finalizer");
             return self
                 .failed(&e, None, vec![Condition::deleting(), Condition::reconcile_error(&e)])
                 .await;
         }
         // B10 / B29: the object is gone, so no status write.
         self.r.metrics.record_deleted(&self.r.subject(&self.mg));
+        tracing::debug!("Successfully deleted managed resource");
         Ok(Outcome::Done)
     }
 
@@ -643,6 +696,7 @@ impl<M: Managed> Run<'_, M> {
         for initializer in &self.r.initializers {
             // B11, B12
             if let Err(e) = bounded(self.deadlines.kubernetes, initializer.initialize(&mut self.mg)).await {
+                tracing::debug!(error = %e, "Cannot initialize managed resource");
                 return ControlFlow::Break(
                     self.failed(
                         &e,
@@ -656,6 +710,7 @@ impl<M: Managed> Run<'_, M> {
         if meta::external_create_incomplete(&self.mg) {
             if !self.r.deterministic_external_name {
                 // B13
+                tracing::debug!("{ERR_CREATE_INCOMPLETE}");
                 let e = Error::new(ERR_CREATE_INCOMPLETE);
                 return ControlFlow::Break(
                     self.report(
@@ -682,6 +737,7 @@ impl<M: Managed> Run<'_, M> {
         let Err(e) = resolved else {
             return ControlFlow::Continue(());
         };
+        tracing::debug!(error = %e, "Cannot resolve managed resource references");
         ControlFlow::Break(
             self.failed(
                 &e,
@@ -696,14 +752,17 @@ impl<M: Managed> Run<'_, M> {
     async fn connect(&mut self) -> Step<Box<dyn DynExternal<M>>> {
         match bounded(self.deadlines.external, self.r.external.connect(&self.mg)).await {
             Ok(external) => ControlFlow::Continue(external),
-            Err(e) => ControlFlow::Break(
-                self.failed(
-                    &e,
-                    Some(Event::warning(reason::CANNOT_CONNECT, &e)),
-                    vec![Condition::reconcile_error(&e.clone().wrap(ERR_RECONCILE_CONNECT))],
+            Err(e) => {
+                tracing::debug!(error = %e, "Cannot connect to provider");
+                ControlFlow::Break(
+                    self.failed(
+                        &e,
+                        Some(Event::warning(reason::CANNOT_CONNECT, &e)),
+                        vec![Condition::reconcile_error(&e.clone().wrap(ERR_RECONCILE_CONNECT))],
+                    )
+                    .await,
                 )
-                .await,
-            ),
+            }
         }
     }
 
@@ -711,10 +770,12 @@ impl<M: Managed> Run<'_, M> {
     /// write. Connector first, then client; a failure only emits an event.
     async fn disconnect(&mut self, ext: &dyn DynExternal<M>) {
         if let Err(e) = bounded(self.deadlines.kubernetes, self.r.external.disconnect()).await {
+            tracing::debug!(error = %e, "Cannot disconnect from provider");
             self.record
                 .event(&self.mg, Event::warning(reason::CANNOT_DISCONNECT, &e));
         }
         if let Err(e) = bounded(self.deadlines.kubernetes, ext.disconnect()).await {
+            tracing::debug!(error = %e, "Cannot disconnect from provider");
             self.record
                 .event(&self.mg, Event::warning(reason::CANNOT_DISCONNECT, &e));
         }
@@ -726,6 +787,7 @@ impl<M: Managed> Run<'_, M> {
             Ok(obs) => obs,
             // B18, B19
             Err(e) => {
+                tracing::debug!(error = %e, "Cannot observe external resource");
                 return ControlFlow::Break(
                     self.failed(
                         &e,
@@ -743,6 +805,7 @@ impl<M: Managed> Run<'_, M> {
         if self.policy.should_only_observe() {
             let e = Error::new(ERR_EXTERNAL_RESOURCE_NOT_EXIST);
             let poll = self.r.poll(&self.mg);
+            tracing::debug!("requeue-after" = %self.r.requeue_after(poll), "External resource does not exist");
             return ControlFlow::Break(
                 self.report(
                     Some(Event::warning(reason::CANNOT_OBSERVE, &e)),
@@ -754,6 +817,7 @@ impl<M: Managed> Run<'_, M> {
         }
         // B21: no status write.
         if meta::external_create_succeeded_during(&self.mg, self.r.timing.creation_grace, self.r.clock.now()) {
+            tracing::debug!("{MSG_PENDING}");
             self.record.event(&self.mg, Event::normal(reason::PENDING, MSG_PENDING));
             return ControlFlow::Break(Ok(Outcome::Requeue));
         }
@@ -769,12 +833,14 @@ impl<M: Managed> Run<'_, M> {
     ) -> Result<Outcome> {
         // B22: other controllers still hold the object, so keep the external resource.
         if self.mg.meta().finalizers.as_ref().is_some_and(|f| f.len() > 1) {
+            tracing::debug!("Delay external deletion until all finalizers have been removed");
             return Ok(Outcome::Requeue);
         }
         if obs.resource_exists && self.policy.should_delete() {
             return match bounded(self.deadlines.external, ext.delete(&mut self.mg)).await {
                 // B23: no conflict short-circuit.
                 Err(e) => {
+                    tracing::debug!(error = %e, "Cannot delete external resource");
                     self.log_change(pre_op, OperationType::Delete, Some(&e), AdditionalDetails::new())
                         .await;
                     self.report(
@@ -789,6 +855,7 @@ impl<M: Managed> Run<'_, M> {
                 }
                 // B24: requeue to confirm the deletion; the finalizer stays.
                 Ok(deletion) => {
+                    tracing::debug!("{MSG_DELETED}");
                     self.log_change(pre_op, OperationType::Delete, None, deletion.additional_details)
                         .await;
                     self.report(
@@ -813,6 +880,7 @@ impl<M: Managed> Run<'_, M> {
         )
         .await;
         if let Err(e) = published {
+            tracing::debug!(error = %e, "Cannot publish connection details");
             return ControlFlow::Break(
                 self.failed(
                     &e,
@@ -825,6 +893,7 @@ impl<M: Managed> Run<'_, M> {
         // B32, B33: no event. The default finalizer PUTs the object, and the response replaces
         // `self.mg`, status included, so conditions Observe set are gone from here on.
         if let Err(e) = bounded(k8s, self.r.finalizer.add_finalizer(&mut self.mg)).await {
+            tracing::debug!(error = %e, "Cannot add finalizer");
             return ControlFlow::Break(self.failed(&e, None, vec![Condition::reconcile_error(&e)]).await);
         }
         ControlFlow::Continue(())
@@ -838,6 +907,7 @@ impl<M: Managed> Run<'_, M> {
         // stop the create.
         meta::set_external_create_pending(&mut self.mg, self.r.clock.now());
         if let Err(e) = bounded(k8s, self.r.client.update(&mut self.mg)).await {
+            tracing::debug!(error = %e, "{ERR_UPDATE_MANAGED}");
             let wrapped = e.clone().wrap(ERR_UPDATE_MANAGED);
             return self
                 .failed(
@@ -852,6 +922,7 @@ impl<M: Managed> Run<'_, M> {
             Ok(creation) => creation,
             // B36: no conflict short-circuit, but a conflict emits no event.
             Err(e) => {
+                tracing::debug!(error = %e, "Cannot create external resource");
                 if !e.is_conflict() {
                     self.record.event(&self.mg, Event::warning(reason::CANNOT_CREATE, &e));
                 }
@@ -863,6 +934,7 @@ impl<M: Managed> Run<'_, M> {
                 )
                 .await;
                 if let Err(update_error) = annotated {
+                    tracing::debug!(error = %update_error, "{ERR_UPDATE_MANAGED_ANNOTATIONS}");
                     self.record.event(
                         &self.mg,
                         Event::warning(
@@ -887,6 +959,7 @@ impl<M: Managed> Run<'_, M> {
         };
 
         // X7: Create may have set the external name.
+        tracing::Span::current().record("external-name", meta::external_name(&self.mg));
         self.record = self
             .r
             .recorder
@@ -903,6 +976,7 @@ impl<M: Managed> Run<'_, M> {
         )
         .await;
         if let Err(e) = annotated {
+            tracing::debug!(error = %e, "{ERR_UPDATE_MANAGED_ANNOTATIONS}");
             let wrapped = e.clone().wrap(ERR_UPDATE_MANAGED_ANNOTATIONS);
             return self
                 .failed(
@@ -922,6 +996,7 @@ impl<M: Managed> Run<'_, M> {
         )
         .await;
         if let Err(e) = published {
+            tracing::debug!(error = %e, "Cannot publish connection details");
             return self
                 .failed(
                     &e,
@@ -932,6 +1007,7 @@ impl<M: Managed> Run<'_, M> {
         }
 
         // B41: requeue to observe whether the new resource is ready.
+        tracing::debug!("{MSG_CREATED}");
         self.report(
             Some(Event::normal(reason::CREATED, MSG_CREATED)),
             vec![Condition::creating(), Condition::reconcile_success()],
@@ -951,6 +1027,7 @@ impl<M: Managed> Run<'_, M> {
         let Err(e) = updated else {
             return ControlFlow::Continue(());
         };
+        tracing::debug!(error = %e, "{ERR_UPDATE_MANAGED}");
         ControlFlow::Break(
             self.report(
                 Some(Event::warning(reason::CANNOT_UPDATE_MANAGED, &e)),
@@ -964,6 +1041,7 @@ impl<M: Managed> Run<'_, M> {
     /// B43 (`R:1496-1514`).
     async fn up_to_date(&mut self) -> Result<Outcome> {
         let poll = self.r.poll(&self.mg);
+        tracing::debug!("requeue-after" = %self.r.requeue_after(poll), "External resource is up to date");
         mark_conditions(&mut self.mg, [Condition::reconcile_success()]);
         self.r.metrics.record_first_time_ready(&self.r.subject(&self.mg));
         self.r
@@ -978,6 +1056,7 @@ impl<M: Managed> Run<'_, M> {
             Ok(update) => update,
             // B46
             Err(e) => {
+                tracing::debug!("Cannot update external resource");
                 self.log_change(pre_op, OperationType::Update, Some(&e), AdditionalDetails::new())
                     .await;
                 return self
@@ -1002,6 +1081,7 @@ impl<M: Managed> Run<'_, M> {
         )
         .await;
         if let Err(e) = published {
+            tracing::debug!(error = %e, "Cannot publish connection details");
             return self
                 .report(
                     Some(Event::warning(reason::CANNOT_PUBLISH, &e)),
@@ -1013,6 +1093,7 @@ impl<M: Managed> Run<'_, M> {
 
         // B48
         let poll = self.r.poll(&self.mg);
+        tracing::debug!("requeue-after" = %self.r.requeue_after(poll), "{MSG_UPDATED}");
         self.report(
             Some(Event::normal(reason::UPDATED, MSG_UPDATED)),
             vec![Condition::reconcile_success()],
