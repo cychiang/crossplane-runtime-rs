@@ -107,7 +107,7 @@ Each unit owns the listed files. Units do not share files except where noted.
 | `crossplane-runtime/src/gate.rs`, `reconciler/customresourcesgate.rs` | `pkg/gate`, `pkg/reconciler/customresourcesgate` | 1.8 |
 | `crossplane-runtime/src/controller/{mod,workqueue,driver}.rs`, `cache.rs`, `manager.rs`, `ratelimiter.rs`, `statemetrics.rs`, `reconciler/mod.rs` | `pkg/controller`, `pkg/ratelimiter`, `pkg/statemetrics`, controller-runtime | 1.9 |
 | `crossplane-derive/src/lib.rs` | crossplane-tools angryjet | 1.10 |
-| `crossplane-runtime/src/reference.rs` (not created yet; `Managed::resolve_references` is its hook) | `pkg/reference` | 1.11 |
+| `crossplane-runtime/src/reference.rs` (`Managed::resolve_references` is its hook) | `pkg/reference` | 1.11 |
 
 Shared files, and who may touch them:
 
@@ -191,6 +191,10 @@ Deviations of the scaffold from the synthesis brief:
   them or because the base had them real, and the unit that owns each must test or replace it:
   the kube client verb mapping (1.4), the derive
   expansion and `controller_gen_compat` (exercised by crd-diff only; 1.10 and 1.2).
+  the kube client verb mapping (1.4), the reconcile timeout and grace wrapper and the phase
+  skeleton of `Run` beyond the two ported branches (1.6), `policy.rs` (1.6), the derive
+  expansion and `controller_gen_compat` (exercised by crd-diff only; 1.10 and 1.2). Unit 1.10
+  has since tested the derives, see below.
 - The provider's HTTP client (`examples/provider-sample/src/provider/client.rs`) is `todo!()`;
   it lands with the template in unit 2.3.
 - `main.rs` mirrors only the environment variables Go names explicitly, not kingpin's
@@ -400,6 +404,30 @@ Unit 1.9, rest (RestConfig, cache, manager, builder, event recorder, statemetric
   with the real ones after the merge.
 - `#![allow(dead_code)]` stays in `crossplane-runtime/src/lib.rs`: the remaining `todo!()`s are
   other units' (1.5, 1.6, 1.7, 1.8).
+- Units 1.10 and 1.11 (derive, reference):
+  - `pkg/reference` is ported for namespaced resources only. The 39 cluster-scoped cases
+    (`TestResolve`, `TestResolveMultiple`, `TestControllersMustMatch`) are skips in
+    `port-skips.tsv`; the 59 others are ported in `reference_test.rs` and tracked in
+    `port-extra.tsv`, outside the denominator.
+  - `To{Managed, List}` is one type parameter on the request, because `Client::get_as` and
+    `list_as` are typed. Go's `Namespace` request field is ignored by the namespaced resolver and
+    is not ported. `Resolve` returns `Result<Response>`, so the Go cases that expect a response
+    next to an error (`ResolvedNoValue`) assert the error only; generated code never reads the
+    response of a failed call.
+  - `ApiNamespacedResolver` borrows the referencing resource. The generated `resolve_references`
+    builds one per call, so it can assign the resolved fields between calls.
+  - The derive generates `resolve_references` from `#[crossplane(reference(...))]` attributes on
+    the spec struct. angryjet reads markers on the value field wherever it sits in the type
+    tree; a derive on the spec cannot see the field types of nested structs, so the attribute
+    names the value field by a dotted path and says `list` for `ResolveMultiple`. Optional
+    parents and lists of nested structs, which angryjet walks, are not supported; such a kind
+    overrides `resolve_references` by hand. The generated error wrap is the Rust path
+    (`spec.for_provider.vpc_id`), where Go's is the Go field path (`mg.Spec.ForProvider.VPCID`),
+    which depends on Go's field naming. A kind with a reference needs `crossplane-runtime` as a
+    dependency because the generated code names it.
+  - `Managed` now requires `#[kube(namespaced)]` at the derive, with a message, instead of a
+    trait-bound error. Go's `GetItems` on lists has no counterpart: `Client::list_as` returns
+    `Vec<K>`.
 
 Unit 1.6 (managed reconciler):
 
