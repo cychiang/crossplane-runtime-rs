@@ -351,3 +351,16 @@ async fn nothing_to_resolve_makes_no_client_calls() {
     let mut i = instance(Params::default());
     resolve(&mut i, &MockClient::default()).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_list_error_names_the_list_field() {
+    let mut i = instance(Params {
+        subnet_id_refs: vec![r("gone")],
+        ..Default::default()
+    });
+    let err = resolve(&mut i, &client_serving(vec![], vec![])).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "spec.for_provider.subnet_ids: cannot get referenced resource: not found"
+    );
+}
