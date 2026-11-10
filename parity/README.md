@@ -165,7 +165,8 @@ second round that writes the same again. Cleanup deleted the ProviderConfig 0 to
 delete landed inside the second round, that round's update or status write failed with 409 and its other write was
 never sent (spec 4.1 PC7 and PC8). Failed writes are not compared, so one run then had a write fewer. In rust-5 this
 happened in `pause` and `default-providerconfig-ref`: the gap from the provider's last ProviderConfig write to the
-delete was 1 and 2ms, against 32 to 36ms for the same tests in go-e to go-j. Go's own ProviderConfig 409s follow the
+delete was 1 and 2ms. For the same tests in go-e to go-j it was 31 to 36ms, except 10ms for
+`default-providerconfig-ref` in go-f, so Go came close too. Go's own ProviderConfig 409s follow the
 same code path: in go-f, go-g and go-h the reconcile that got the 409 wrote no status, and a reconcile 1ms later wrote
 the identical pair, which the collapse rule then merged.
 
