@@ -4,9 +4,14 @@
 
 use std::collections::BTreeMap;
 
-use crossplane_core::errors::Result;
+use crossplane_core::errors::{Error, Result, ResultExt};
+use crossplane_core::meta;
+use crossplane_core::resource::{Managed, Object};
 use futures::future::BoxFuture;
 use k8s_openapi::jiff::Timestamp;
+
+const ERR_SNAPSHOT: &str = "cannot snapshot managed resource";
+const ERR_SEND: &str = "cannot send change log entry";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationType {
@@ -28,6 +33,31 @@ pub struct ChangeLogEntry {
     pub snapshot: serde_json::Value,
     pub error_message: Option<String>,
     pub additional_details: BTreeMap<String, String>,
+}
+
+impl ChangeLogEntry {
+    /// The entry Go's `GRPCChangeLogger.Log` builds from its arguments
+    /// (`changelogger.go:85-109`). `managed` is the pre-operation copy.
+    pub fn new<M: Managed>(
+        managed: &M,
+        operation: OperationType,
+        change_error: Option<&Error>,
+        additional_details: BTreeMap<String, String>,
+        timestamp: Timestamp,
+    ) -> Result<Self> {
+        let snapshot = managed.to_json().wrap_err(ERR_SNAPSHOT)?;
+        Ok(Self {
+            timestamp,
+            api_version: M::api_version(&()).into_owned(),
+            kind: M::kind(&()).into_owned(),
+            name: meta::name(managed).to_owned(),
+            external_name: meta::external_name(managed).to_owned(),
+            operation,
+            snapshot,
+            error_message: change_error.map(Error::to_string),
+            additional_details,
+        })
+    }
 }
 
 /// Go `ChangeLogger`. A failure is logged at info and never changes the reconcile outcome.

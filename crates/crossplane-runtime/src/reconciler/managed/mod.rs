@@ -5,9 +5,11 @@
 //! `ReconcilerOption` list: every collaborator a Go table replaces is a builder method, and
 //! `build()` with no options gives Go's defaults.
 //!
-//! The 48 return branches of `docs/phase0/02-parity-spec.md` section 1.3 live in [`Run`], one
-//! method per phase, each named with the branch IDs it owns. `R:n` and `A:n` are that
-//! document's aliases for `reconciler.go:n` and `api.go:n` in the Go package.
+//! The 48 return branches of `docs/phase0/02-parity-spec.md` section 1.3 live in
+//! [`Reconciler::run`] (B01-B03) and [`Run`] (B05-B48), one method per phase, each documented
+//! with the branch IDs it owns and the Go lines it ports. `R:n` and `A:n` are that document's
+//! aliases for `reconciler.go:n` and `api.go:n` in the Go package. Within a branch the order of
+//! effects is Go's: change log, event, condition, status write.
 
 mod changelog;
 mod collaborators;
@@ -18,7 +20,6 @@ pub mod policy;
 #[cfg(test)]
 mod reconciler_modern_test;
 
-use std::borrow::Cow;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +28,7 @@ use crossplane_core::client::Client;
 use crossplane_core::errors::{Error, Result, ResultExt};
 use crossplane_core::meta;
 use crossplane_core::resource::{Kind, Managed, ObjectType, mark_conditions};
-use crossplane_core::v2::Condition;
+use crossplane_core::v2::{Condition, ConnectionDetails};
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use tokio::time::Instant;
@@ -96,6 +97,9 @@ pub const ERR_RECONCILE_DELETE: &str = "delete failed";
 pub const ERR_RECORD_CHANGE_LOG: &str = "cannot record change log entry";
 pub const ERR_EXTERNAL_RESOURCE_NOT_EXIST: &str = "external resource does not exist";
 pub const ERR_UPDATE_MANAGED: &str = "cannot update managed resource";
+pub const ERR_PATCH_MANAGED: &str = "cannot patch the managed resource via server-side apply";
+pub const ERR_MARSHAL_EXISTING: &str = "cannot marshal the existing object into JSON";
+pub const ERR_MARSHAL_RESOLVED: &str = "cannot marshal the object with the resolved references into JSON";
 pub const ERR_UPDATE_MANAGED_STATUS: &str = "cannot update managed resource status";
 pub const ERR_RESOLVE_REFERENCES: &str = "cannot resolve references";
 pub const ERR_UPDATE_CRITICAL_ANNOTATIONS: &str = "cannot update critical annotations";
@@ -103,6 +107,11 @@ pub const ERR_CREATE_OR_UPDATE_SECRET: &str = "cannot create or update connectio
 
 pub const MSG_RECONCILIATION_PAUSED: &str =
     "Reconciliation is paused either through the `spec.managementPolicies` or the pause annotation";
+pub const MSG_RECONCILE_REQUEST_HANDLED: &str = "Handling reconcile request";
+pub const MSG_PENDING: &str = "Waiting for external resource existence to be confirmed";
+pub const MSG_DELETED: &str = "Successfully requested deletion of external resource";
+pub const MSG_CREATED: &str = "Successfully requested creation of external resource";
+pub const MSG_UPDATED: &str = "Successfully requested update of external resource";
 
 pub mod reason {
     use std::borrow::Cow::Borrowed;
@@ -232,7 +241,10 @@ impl<M: Managed> ReconcilerBuilder<M> {
     }
     /// `WithPollJitterHook`: uniform in `[-jitter, +jitter)`.
     pub fn poll_jitter_hook(self, jitter: Duration) -> Self {
-        todo!("hook: d + (rand - 0.5) * 2 * {jitter:?}")
+        self.poll_interval_hook(move |_, poll| {
+            let offset = (rand::random::<f64>() - 0.5) * 2.0 * jitter.as_secs_f64();
+            Duration::try_from_secs_f64(poll.as_secs_f64() + offset).unwrap_or(Duration::ZERO)
+        })
     }
     pub fn creation_grace_period(mut self, d: Duration) -> Self {
         self.timing.creation_grace = d;
@@ -333,35 +345,55 @@ impl<M: Managed> ReconcilerBuilder<M> {
     }
 }
 
+/// Go's two contexts (X2, `R:927-931`). Connect, Observe, Create, Update and Delete end at
+/// `external`; every Kubernetes call, publish, change log and disconnect ends at `kubernetes`,
+/// `Timing::grace` later, so the status write survives an external timeout.
+#[derive(Clone, Copy)]
+struct Deadlines {
+    external: Instant,
+    kubernetes: Instant,
+}
+
+/// A call under a Go context with a deadline: it fails with `context deadline exceeded` when the
+/// deadline has passed or passes while it runs, and the reconcile carries on to the branch that
+/// handles the error.
+async fn bounded<T>(deadline: Instant, call: impl Future<Output = Result<T>>) -> Result<T> {
+    if Instant::now() >= deadline {
+        return Err(Error::deadline_exceeded());
+    }
+    match tokio::time::timeout_at(deadline, call).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::deadline_exceeded()),
+    }
+}
+
 impl<M: Managed> Reconcile for Reconciler<M> {
-    /// Two deadlines, as Go's two contexts (X2): the external calls share one that ends at
-    /// `timing.timeout`; the whole run ends `timing.grace` later.
-    ///
-    /// OPEN (docs/design/core.md): at the outer deadline this drops the whole run and returns a
-    /// deadline error. Go lets each later Kubernetes call fail on the expired context and
-    /// carries on through the remaining branches.
     fn reconcile<'a>(&'a self, req: &'a Request) -> BoxFuture<'a, Result<Outcome>> {
         async move {
             let start = Instant::now();
-            let run = self.run(req, start + self.timing.timeout);
-            let result = match tokio::time::timeout_at(start + self.timing.timeout + self.timing.grace, run).await {
-                Ok(result) => result,
-                Err(_) => Err(Error::deadline_exceeded()),
+            let deadlines = Deadlines {
+                external: start + self.timing.timeout,
+                kubernetes: start + self.timing.timeout + self.timing.grace,
             };
-            silently_requeue_on_conflict(result)
+            // X1 (R:922).
+            silently_requeue_on_conflict(self.run(req, deadlines).await)
         }
         .boxed()
     }
 }
 
 impl<M: Managed> Reconciler<M> {
-    async fn run(&self, req: &Request, external_deadline: Instant) -> Result<Outcome> {
-        let mut mg = match self.client.get_as::<M>(req).await {
+    /// B01-B03 and S1 (`R:933-994`), then the rest of the run.
+    async fn run(&self, req: &Request, deadlines: Deadlines) -> Result<Outcome> {
+        // B01, B02
+        let mut mg = match bounded(deadlines.kubernetes, self.client.get_as::<M>(req)).await {
             Ok(mg) => mg,
             Err(e) if e.is_not_found() => return Ok(Outcome::Done),
             Err(e) => return Err(e.wrap(ERR_GET_MANAGED)),
         };
+        // X6
         self.metrics.record_first_time_reconciled(&self.subject(&mg));
+        // X7
         let record = self
             .recorder
             .with_annotations(&[("external-name", meta::external_name(&mg))]);
@@ -371,7 +403,8 @@ impl<M: Managed> Reconciler<M> {
             &self.supported_policies,
         );
 
-        // B03
+        // B03. The status write does not go through `Run::finish`, so a paused resource never
+        // records a reconcile-request token.
         if meta::is_paused(&mg) || policy.is_paused() {
             record.event(
                 &mg,
@@ -379,20 +412,19 @@ impl<M: Managed> Reconciler<M> {
                     .with_annotation("annotation", meta::ANNOTATION_KEY_RECONCILIATION_PAUSED),
             );
             mark_conditions(&mut mg, [Condition::reconcile_paused()]);
-            return self
-                .client
-                .update_status(&mut mg)
+            return bounded(deadlines.kubernetes, self.client.update_status(&mut mg))
                 .await
                 .map(|()| Outcome::Done)
                 .wrap_err(ERR_UPDATE_MANAGED_STATUS);
         }
 
-        // S1
+        // S1. The token reaches status only in `Run::finish`, so it survives the full-object
+        // updates in between.
         let token = match meta::reconcile_request(&mg) {
-            Some(t) if M::TRACKS_RECONCILE_REQUESTS && last_handled(&mg) != Some(t) => {
+            Some(t) if M::TRACKS_RECONCILE_REQUESTS && mg.last_handled_reconcile_at() != t => {
                 record.event(
                     &mg,
-                    Event::normal(reason::RECONCILE_REQUEST_HANDLED, "Handling reconcile request")
+                    Event::normal(reason::RECONCILE_REQUEST_HANDLED, MSG_RECONCILE_REQUEST_HANDLED)
                         .with_annotation("token", t),
                 );
                 Some(t.to_owned())
@@ -406,7 +438,7 @@ impl<M: Managed> Reconciler<M> {
             record,
             policy,
             token,
-            external_deadline,
+            deadlines,
         }
         .reconcile()
         .await
@@ -420,254 +452,573 @@ impl<M: Managed> Reconciler<M> {
         }
     }
 
-    /// Go `effectivePollInterval` then the hook (`R:867-875`, 1.5).
-    fn poll(&self, mg: &M) -> Duration {
-        let base = match meta::poll_interval(mg) {
+    /// Go `effectivePollInterval` (`R:867-875`): the annotation, floored at the minimum; else the
+    /// configured interval, which the floor does not apply to.
+    fn effective_poll_interval(&self, mg: &M) -> Duration {
+        match meta::poll_interval(mg) {
             Some(d) => d.max(self.timing.min_poll_interval),
             None => self.timing.poll_interval,
-        };
-        (self.poll_interval_hook)(mg, base)
+        }
     }
-}
 
-fn last_handled<M: Managed>(mg: &M) -> Option<&str> {
-    mg.managed_status()
-        .map(|s| s.observed.last_handled_reconcile_at.as_str())
+    /// `pollIntervalHook(managed, effectivePollInterval(managed))`.
+    fn poll(&self, mg: &M) -> Duration {
+        (self.poll_interval_hook)(mg, self.effective_poll_interval(mg))
+    }
 }
 
 /// One reconcile after the pause check: the per-run state Go keeps in locals of `Reconcile`.
-/// Each phase either continues or ends the run with the branch's result.
+/// Each phase either continues or ends the run with its branch's result.
 struct Run<'a, M: Managed> {
     r: &'a Reconciler<M>,
     mg: M,
+    /// Rebuilt with the new external name after a successful Create (X7).
     record: Arc<dyn Recorder>,
     policy: PolicyResolver<'a>,
+    /// S1's pending reconcile-request token.
     token: Option<String>,
-    external_deadline: Instant,
+    deadlines: Deadlines,
 }
 
-type Step = ControlFlow<Result<Outcome>>;
+type Step<T = ()> = ControlFlow<Result<Outcome>, T>;
+
+/// Unwraps a phase's `Continue` or returns its branch result.
+macro_rules! step {
+    ($phase:expr) => {
+        match $phase {
+            ControlFlow::Continue(v) => v,
+            ControlFlow::Break(result) => return result,
+        }
+    };
+}
 
 impl<M: Managed> Run<'_, M> {
     async fn reconcile(mut self) -> Result<Outcome> {
-        if let ControlFlow::Break(r) = self.validate_policy().await {
-            return r;
-        }
+        step!(self.validate_policy().await);
         if meta::was_deleted(&self.mg) && !self.policy.should_delete() {
-            return self.delete_without_external().await;
+            return self.unpublish_and_remove_finalizer(&ConnectionDetails::new()).await;
         }
-        if let ControlFlow::Break(r) = self.initialize().await {
-            return r;
+        step!(self.initialize().await);
+        // S3
+        if !meta::was_deleted(&self.mg) {
+            step!(self.resolve_references().await);
         }
-        if let ControlFlow::Break(r) = self.resolve_references().await {
-            return r;
-        }
-        let external = match self.connect().await {
-            Ok(e) => e,
-            Err(r) => return r,
-        };
-        let r = self.with_external(&*external).await;
+        let external = step!(self.connect().await);
+        let result = self.with_external(&*external).await;
         self.disconnect(&*external).await;
-        r
+        result
     }
 
-    /// B18-B48: everything after a successful connect.
+    /// B18-B48: everything between a successful connect and the deferred disconnect.
     async fn with_external(&mut self, ext: &dyn DynExternal<M>) -> Result<Outcome> {
-        let obs = match self.observe(ext).await {
-            Ok(o) => o,
-            Err(r) => return r,
-        };
+        let obs = step!(self.observe(ext).await);
+        // R:1229. Taken once, before any external operation or metadata update, and used by
+        // every change log entry of this run.
+        let pre_op = self.mg.clone();
         if meta::was_deleted(&self.mg) {
-            return self.delete_external(ext, &obs).await;
+            return self.delete_external(ext, &obs, &pre_op).await;
         }
-        if let ControlFlow::Break(r) = self.publish_observed_and_finalize(&obs).await {
-            return r;
-        }
+        step!(self.publish_observed_and_add_finalizer(&obs).await);
         if !obs.resource_exists && self.policy.should_create() {
-            return self.create_external(ext).await;
+            return self.create_external(ext, &pre_op).await;
         }
-        if let ControlFlow::Break(r) = self.late_initialize(&obs).await {
-            return r;
-        }
+        step!(self.late_initialize(&obs).await);
         if obs.resource_up_to_date {
             return self.up_to_date().await;
         }
-        if !obs.resource_exists || !self.policy.should_update() {
-            // B44, B45
-            mark_conditions(&mut self.mg, [Condition::reconcile_success()]);
-            let poll = self.r.poll(&self.mg);
-            return self.finish(Outcome::RequeueAfter(poll)).await;
+        if !obs.resource_exists {
+            // B44 (R:1517-1523)
+            return self.succeed_and_poll().await;
         }
-        self.update_external(ext).await
+        // S6
+        if !obs.diff.is_empty() {
+            tracing::debug!(diff = %obs.diff, "External resource differs from desired state");
+        }
+        if !self.policy.should_update() {
+            // B45 (R:1531-1536)
+            return self.succeed_and_poll().await;
+        }
+        self.update_external(ext, &pre_op).await
     }
 
-    /// X3: stamp the pending token, PUT status, return `outcome` or the wrapped status error.
-    /// Every branch that writes status ends here.
+    /// X3 (`R:999-1006`): stamp the pending token, PUT status, return `outcome` or the wrapped
+    /// status error (X4). Every branch that writes status ends here.
     async fn finish(&mut self, outcome: Outcome) -> Result<Outcome> {
-        if let Some(t) = &self.token {
-            self.mg.managed_status_mut().observed.last_handled_reconcile_at = t.clone();
+        if let Some(token) = &self.token {
+            self.mg.set_last_handled_reconcile_at(token.clone());
         }
-        self.r
-            .client
-            .update_status(&mut self.mg)
+        bounded(self.deadlines.kubernetes, self.r.client.update_status(&mut self.mg))
             .await
             .map(|()| outcome)
             .wrap_err(ERR_UPDATE_MANAGED_STATUS)
     }
 
-    /// Mark `conds`, emit `ev` if any, then [`Run::finish`].
-    async fn fail(&mut self, conds: Vec<Condition>, ev: Option<Event>, outcome: Outcome) -> Result<Outcome> {
-        if let Some(ev) = ev {
-            self.record.event(&self.mg, ev);
+    /// Go's order at the end of a branch: event, conditions, status write.
+    async fn report(&mut self, event: Option<Event>, conditions: Vec<Condition>, outcome: Outcome) -> Result<Outcome> {
+        if let Some(event) = event {
+            self.record.event(&self.mg, event);
         }
-        mark_conditions(&mut self.mg, conds);
+        mark_conditions(&mut self.mg, conditions);
         self.finish(outcome).await
     }
 
-    /// Bound an external call by the shared external deadline.
-    async fn external<T>(&self, f: impl Future<Output = Result<T>>) -> Result<T> {
-        match tokio::time::timeout_at(self.external_deadline, f).await {
-            Ok(result) => result,
-            Err(_) => Err(Error::deadline_exceeded()),
+    /// The shape of every collaborator failure that has a conflict short-circuit: a conflict
+    /// requeues with no event and no status write (B06, B08, B11, B14, B16, B18, B25, B27, B30,
+    /// B32, B34, B37, B39); anything else is reported and requeued.
+    async fn failed(&mut self, cause: &Error, event: Option<Event>, conditions: Vec<Condition>) -> Result<Outcome> {
+        if cause.is_conflict() {
+            return Ok(Outcome::Requeue);
+        }
+        self.report(event, conditions, Outcome::Requeue).await
+    }
+
+    async fn succeed_and_poll(&mut self) -> Result<Outcome> {
+        let poll = self.r.poll(&self.mg);
+        self.report(None, vec![Condition::reconcile_success()], Outcome::RequeueAfter(poll))
+            .await
+    }
+
+    /// A failed send is logged and never changes the outcome (`R:1252-1254`).
+    async fn log_change(
+        &self,
+        pre_op: &M,
+        operation: OperationType,
+        change_error: Option<&Error>,
+        additional_details: AdditionalDetails,
+    ) {
+        let entry = ChangeLogEntry::new(pre_op, operation, change_error, additional_details, self.r.clock.now());
+        let sent = match entry {
+            Ok(entry) => bounded(self.deadlines.kubernetes, self.r.change_logger.log(entry)).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = sent {
+            tracing::info!(error = %e, "{ERR_RECORD_CHANGE_LOG}");
         }
     }
 
-    /// B04, B05.
+    /// B05 (`R:1016-1026`). B04, the conflict arm at `R:1019-1020`, has no counterpart:
+    /// `validate` builds its errors itself and none is a conflict.
     async fn validate_policy(&mut self) -> Step {
-        match self.policy.validate() {
-            Ok(()) => ControlFlow::Continue(()),
-            Err(m) => {
-                let e = Error::new(m);
-                let conds = vec![Condition::reconcile_error(&e)];
-                ControlFlow::Break(
-                    self.fail(
-                        conds,
-                        Some(Event::warning(reason::CANNOT_USE_INVALID_POLICY, &e)),
-                        Outcome::Done,
-                    )
-                    .await,
+        let Err(message) = self.policy.validate() else {
+            return ControlFlow::Continue(());
+        };
+        let e = Error::new(message);
+        ControlFlow::Break(
+            self.report(
+                Some(Event::warning(reason::CANNOT_USE_INVALID_POLICY, &e)),
+                vec![Condition::reconcile_error(&e)],
+                Outcome::Done,
+            )
+            .await,
+        )
+    }
+
+    /// The tail of both delete paths: B06-B10 (`R:1032-1080`, deleted and the policy forbids
+    /// Delete, with empty details and no connect) and B25-B29 (`R:1281-1321`, the external
+    /// resource is gone).
+    async fn unpublish_and_remove_finalizer(&mut self, details: &ConnectionDetails) -> Result<Outcome> {
+        let k8s = self.deadlines.kubernetes;
+        // B06, B07 / B25, B26
+        if let Err(e) = bounded(k8s, self.r.publisher.unpublish_connection(&self.mg, details)).await {
+            return self
+                .failed(
+                    &e,
+                    Some(Event::warning(reason::CANNOT_UNPUBLISH, &e)),
+                    vec![Condition::deleting(), Condition::reconcile_error(&e)],
                 )
-            }
+                .await;
         }
+        // B08, B09 / B27, B28: no event.
+        if let Err(e) = bounded(k8s, self.r.finalizer.remove_finalizer(&mut self.mg)).await {
+            return self
+                .failed(&e, None, vec![Condition::deleting(), Condition::reconcile_error(&e)])
+                .await;
+        }
+        // B10 / B29: the object is gone, so no status write.
+        self.r.metrics.record_deleted(&self.r.subject(&self.mg));
+        Ok(Outcome::Done)
     }
 
-    /// B06-B10: deleted and the policy forbids Delete. Unpublish with no details, remove the
-    /// finalizer, never connect.
-    async fn delete_without_external(&mut self) -> Result<Outcome> {
-        todo!("R:1032-1080")
-    }
-
-    /// B11-B13 and S2: the initializer chain, then the create-pending guard.
+    /// B11-B13 and S2 (`R:1083-1114`): the initializer chain, then the create-pending guard.
     async fn initialize(&mut self) -> Step {
-        for i in &self.r.initializers {
-            if let Err(e) = i.initialize(&mut self.mg).await {
-                if e.is_conflict() {
-                    return ControlFlow::Break(Ok(Outcome::Requeue));
-                }
-                let conds = vec![Condition::reconcile_error(&e)];
+        for initializer in &self.r.initializers {
+            // B11, B12
+            if let Err(e) = bounded(self.deadlines.kubernetes, initializer.initialize(&mut self.mg)).await {
                 return ControlFlow::Break(
-                    self.fail(
-                        conds,
+                    self.failed(
+                        &e,
                         Some(Event::warning(reason::CANNOT_INITIALIZE, &e)),
-                        Outcome::Requeue,
+                        vec![Condition::reconcile_error(&e)],
                     )
                     .await,
                 );
             }
         }
-        if meta::external_create_incomplete(&self.mg) && !self.r.deterministic_external_name {
-            let e = Error::new(ERR_CREATE_INCOMPLETE);
-            let conds = vec![Condition::creating(), Condition::reconcile_error(&e)];
-            return ControlFlow::Break(
-                self.fail(
-                    conds,
-                    Some(Event::warning(reason::CANNOT_INITIALIZE, &e)),
-                    Outcome::Done,
-                )
-                .await,
-            );
+        if meta::external_create_incomplete(&self.mg) {
+            if !self.r.deterministic_external_name {
+                // B13
+                let e = Error::new(ERR_CREATE_INCOMPLETE);
+                return ControlFlow::Break(
+                    self.report(
+                        Some(Event::warning(reason::CANNOT_INITIALIZE, &e)),
+                        vec![Condition::creating(), Condition::reconcile_error(&e)],
+                        Outcome::Done,
+                    )
+                    .await,
+                );
+            }
+            // S2
+            tracing::debug!("Cannot determine creation result, but proceeding due to deterministic external name");
         }
         ControlFlow::Continue(())
     }
 
-    /// B14, B15 and S3 (skipped when deleted).
+    /// B14, B15 (`R:1125-1142`).
     async fn resolve_references(&mut self) -> Step {
-        todo!("R:1125-1141, error wrapped in ERR_RESOLVE_REFERENCES by the resolver")
+        let resolved = bounded(
+            self.deadlines.kubernetes,
+            self.r.reference_resolver.resolve_references(&mut self.mg),
+        )
+        .await;
+        let Err(e) = resolved else {
+            return ControlFlow::Continue(());
+        };
+        ControlFlow::Break(
+            self.failed(
+                &e,
+                Some(Event::warning(reason::CANNOT_RESOLVE_REFS, &e)),
+                vec![Condition::reconcile_error(&e)],
+            )
+            .await,
+        )
     }
 
-    /// B16, B17. The event carries the raw error, the condition the wrapped one.
-    async fn connect(&mut self) -> Result<Box<dyn DynExternal<M>>, Result<Outcome>> {
-        let connected = self.external(self.r.external.connect(&self.mg)).await;
-        match connected {
-            Ok(c) => Ok(c),
-            Err(e) => Err(self
-                .fail(
-                    vec![Condition::reconcile_error(&e.clone().wrap(ERR_RECONCILE_CONNECT))],
+    /// B16, B17 (`R:1145-1162`). The event carries the raw error, the condition the wrapped one.
+    async fn connect(&mut self) -> Step<Box<dyn DynExternal<M>>> {
+        match bounded(self.deadlines.external, self.r.external.connect(&self.mg)).await {
+            Ok(external) => ControlFlow::Continue(external),
+            Err(e) => ControlFlow::Break(
+                self.failed(
+                    &e,
                     Some(Event::warning(reason::CANNOT_CONNECT, &e)),
+                    vec![Condition::reconcile_error(&e.clone().wrap(ERR_RECONCILE_CONNECT))],
+                )
+                .await,
+            ),
+        }
+    }
+
+    /// X5, S7, S8 (`R:1164-1176`): Go's deferred disconnect, so it runs after the branch's status
+    /// write. Connector first, then client; a failure only emits an event.
+    async fn disconnect(&mut self, ext: &dyn DynExternal<M>) {
+        if let Err(e) = bounded(self.deadlines.kubernetes, self.r.external.disconnect()).await {
+            self.record
+                .event(&self.mg, Event::warning(reason::CANNOT_DISCONNECT, &e));
+        }
+        if let Err(e) = bounded(self.deadlines.kubernetes, ext.disconnect()).await {
+            self.record
+                .event(&self.mg, Event::warning(reason::CANNOT_DISCONNECT, &e));
+        }
+    }
+
+    /// B18-B21 (`R:1178-1223`).
+    async fn observe(&mut self, ext: &dyn DynExternal<M>) -> Step<ExternalObservation> {
+        let obs = match bounded(self.deadlines.external, ext.observe(&mut self.mg)).await {
+            Ok(obs) => obs,
+            // B18, B19
+            Err(e) => {
+                return ControlFlow::Break(
+                    self.failed(
+                        &e,
+                        Some(Event::warning(reason::CANNOT_OBSERVE, &e)),
+                        vec![Condition::reconcile_error(&e.clone().wrap(ERR_RECONCILE_OBSERVE))],
+                    )
+                    .await,
+                );
+            }
+        };
+        if obs.resource_exists {
+            return ControlFlow::Continue(obs);
+        }
+        // B20: a stable state, so the poll interval and not the error backoff.
+        if self.policy.should_only_observe() {
+            let e = Error::new(ERR_EXTERNAL_RESOURCE_NOT_EXIST);
+            let poll = self.r.poll(&self.mg);
+            return ControlFlow::Break(
+                self.report(
+                    Some(Event::warning(reason::CANNOT_OBSERVE, &e)),
+                    vec![Condition::reconcile_error(&e.clone().wrap(ERR_RECONCILE_OBSERVE))],
+                    Outcome::RequeueAfter(poll),
+                )
+                .await,
+            );
+        }
+        // B21: no status write.
+        if meta::external_create_succeeded_during(&self.mg, self.r.timing.creation_grace, self.r.clock.now()) {
+            self.record.event(&self.mg, Event::normal(reason::PENDING, MSG_PENDING));
+            return ControlFlow::Break(Ok(Outcome::Requeue));
+        }
+        ControlFlow::Continue(obs)
+    }
+
+    /// B22-B29 (`R:1231-1321`).
+    async fn delete_external(
+        &mut self,
+        ext: &dyn DynExternal<M>,
+        obs: &ExternalObservation,
+        pre_op: &M,
+    ) -> Result<Outcome> {
+        // B22: other controllers still hold the object, so keep the external resource.
+        if self.mg.meta().finalizers.as_ref().is_some_and(|f| f.len() > 1) {
+            return Ok(Outcome::Requeue);
+        }
+        if obs.resource_exists && self.policy.should_delete() {
+            return match bounded(self.deadlines.external, ext.delete(&mut self.mg)).await {
+                // B23: no conflict short-circuit.
+                Err(e) => {
+                    self.log_change(pre_op, OperationType::Delete, Some(&e), AdditionalDetails::new())
+                        .await;
+                    self.report(
+                        Some(Event::warning(reason::CANNOT_DELETE, &e)),
+                        vec![
+                            Condition::deleting(),
+                            Condition::reconcile_error(&e.clone().wrap(ERR_RECONCILE_DELETE)),
+                        ],
+                        Outcome::Requeue,
+                    )
+                    .await
+                }
+                // B24: requeue to confirm the deletion; the finalizer stays.
+                Ok(deletion) => {
+                    self.log_change(pre_op, OperationType::Delete, None, deletion.additional_details)
+                        .await;
+                    self.report(
+                        Some(Event::normal(reason::DELETED, MSG_DELETED)),
+                        vec![Condition::deleting(), Condition::reconcile_success()],
+                        Outcome::Requeue,
+                    )
+                    .await
+                }
+            };
+        }
+        self.unpublish_and_remove_finalizer(&obs.connection_details).await
+    }
+
+    /// B30-B33 (`R:1324-1353`).
+    async fn publish_observed_and_add_finalizer(&mut self, obs: &ExternalObservation) -> Step {
+        let k8s = self.deadlines.kubernetes;
+        // B30, B31
+        let published = bounded(
+            k8s,
+            self.r.publisher.publish_connection(&self.mg, &obs.connection_details),
+        )
+        .await;
+        if let Err(e) = published {
+            return ControlFlow::Break(
+                self.failed(
+                    &e,
+                    Some(Event::warning(reason::CANNOT_PUBLISH, &e)),
+                    vec![Condition::reconcile_error(&e)],
+                )
+                .await,
+            );
+        }
+        // B32, B33: no event. The default finalizer PUTs the object, and the response replaces
+        // `self.mg`, status included, so conditions Observe set are gone from here on.
+        if let Err(e) = bounded(k8s, self.r.finalizer.add_finalizer(&mut self.mg)).await {
+            return ControlFlow::Break(self.failed(&e, None, vec![Condition::reconcile_error(&e)]).await);
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// B34-B41 (`R:1355-1476`).
+    async fn create_external(&mut self, ext: &dyn DynExternal<M>, pre_op: &M) -> Result<Outcome> {
+        let k8s = self.deadlines.kubernetes;
+
+        // B34, B35. A plain update, not the retrying updater: a 409 on a stale object must
+        // stop the create.
+        meta::set_external_create_pending(&mut self.mg, self.r.clock.now());
+        if let Err(e) = bounded(k8s, self.r.client.update(&mut self.mg)).await {
+            let wrapped = e.clone().wrap(ERR_UPDATE_MANAGED);
+            return self
+                .failed(
+                    &e,
+                    Some(Event::warning(reason::CANNOT_UPDATE_MANAGED, &wrapped)),
+                    vec![Condition::creating(), Condition::reconcile_error(&wrapped)],
+                )
+                .await;
+        }
+
+        let creation = match bounded(self.deadlines.external, ext.create(&mut self.mg)).await {
+            Ok(creation) => creation,
+            // B36: no conflict short-circuit, but a conflict emits no event.
+            Err(e) => {
+                if !e.is_conflict() {
+                    self.record.event(&self.mg, Event::warning(reason::CANNOT_CREATE, &e));
+                }
+                meta::set_external_create_failed(&mut self.mg, self.r.clock.now());
+                // S4: the condition below reports why the create failed, not this.
+                let annotated = bounded(
+                    k8s,
+                    self.r.critical_annotations.update_critical_annotations(&mut self.mg),
+                )
+                .await;
+                if let Err(update_error) = annotated {
+                    self.record.event(
+                        &self.mg,
+                        Event::warning(
+                            reason::CANNOT_UPDATE_MANAGED,
+                            &update_error.wrap(ERR_UPDATE_MANAGED_ANNOTATIONS),
+                        ),
+                    );
+                }
+                self.log_change(pre_op, OperationType::Create, Some(&e), AdditionalDetails::new())
+                    .await;
+                return self
+                    .report(
+                        None,
+                        vec![
+                            Condition::creating(),
+                            Condition::reconcile_error(&e.wrap(ERR_RECONCILE_CREATE)),
+                        ],
+                        Outcome::Requeue,
+                    )
+                    .await;
+            }
+        };
+
+        // X7: Create may have set the external name.
+        self.record = self
+            .r
+            .recorder
+            .with_annotations(&[("external-name", meta::external_name(&self.mg))]);
+        self.log_change(pre_op, OperationType::Create, None, creation.additional_details)
+            .await;
+
+        // B37, B38. The updater's response replaces everything Create changed except
+        // annotations.
+        meta::set_external_create_succeeded(&mut self.mg, self.r.clock.now());
+        let annotated = bounded(
+            k8s,
+            self.r.critical_annotations.update_critical_annotations(&mut self.mg),
+        )
+        .await;
+        if let Err(e) = annotated {
+            let wrapped = e.clone().wrap(ERR_UPDATE_MANAGED_ANNOTATIONS);
+            return self
+                .failed(
+                    &e,
+                    Some(Event::warning(reason::CANNOT_UPDATE_MANAGED, &wrapped)),
+                    vec![Condition::creating(), Condition::reconcile_error(&wrapped)],
+                )
+                .await;
+        }
+
+        // B39, B40
+        let published = bounded(
+            k8s,
+            self.r
+                .publisher
+                .publish_connection(&self.mg, &creation.connection_details),
+        )
+        .await;
+        if let Err(e) = published {
+            return self
+                .failed(
+                    &e,
+                    Some(Event::warning(reason::CANNOT_PUBLISH, &e)),
+                    vec![Condition::creating(), Condition::reconcile_error(&e)],
+                )
+                .await;
+        }
+
+        // B41: requeue to observe whether the new resource is ready.
+        self.report(
+            Some(Event::normal(reason::CREATED, MSG_CREATED)),
+            vec![Condition::creating(), Condition::reconcile_success()],
+            Outcome::Requeue,
+        )
+        .await
+    }
+
+    /// S5, B42 (`R:1479-1494`). The update's response replaces `self.mg`, so status set by
+    /// Observe is reset to the server's. No conflict short-circuit; the event carries the raw
+    /// error.
+    async fn late_initialize(&mut self, obs: &ExternalObservation) -> Step {
+        if !(obs.resource_late_initialized && self.policy.should_late_initialize()) {
+            return ControlFlow::Continue(());
+        }
+        let updated = bounded(self.deadlines.kubernetes, self.r.client.update(&mut self.mg)).await;
+        let Err(e) = updated else {
+            return ControlFlow::Continue(());
+        };
+        ControlFlow::Break(
+            self.report(
+                Some(Event::warning(reason::CANNOT_UPDATE_MANAGED, &e)),
+                vec![Condition::reconcile_error(&e.clone().wrap(ERR_UPDATE_MANAGED))],
+                Outcome::Requeue,
+            )
+            .await,
+        )
+    }
+
+    /// B43 (`R:1496-1514`).
+    async fn up_to_date(&mut self) -> Result<Outcome> {
+        let poll = self.r.poll(&self.mg);
+        mark_conditions(&mut self.mg, [Condition::reconcile_success()]);
+        self.r.metrics.record_first_time_ready(&self.r.subject(&self.mg));
+        self.r
+            .metrics
+            .record_unchanged(self.mg.meta().name.as_deref().unwrap_or_default());
+        self.finish(Outcome::RequeueAfter(poll)).await
+    }
+
+    /// B46-B48 (`R:1539-1586`). Neither failure has a conflict short-circuit.
+    async fn update_external(&mut self, ext: &dyn DynExternal<M>, pre_op: &M) -> Result<Outcome> {
+        let update = match bounded(self.deadlines.external, ext.update(&mut self.mg)).await {
+            Ok(update) => update,
+            // B46
+            Err(e) => {
+                self.log_change(pre_op, OperationType::Update, Some(&e), AdditionalDetails::new())
+                    .await;
+                return self
+                    .report(
+                        Some(Event::warning(reason::CANNOT_UPDATE, &e)),
+                        vec![Condition::reconcile_error(&e.clone().wrap(ERR_RECONCILE_UPDATE))],
+                        Outcome::Requeue,
+                    )
+                    .await;
+            }
+        };
+        self.r.metrics.record_drift(&self.r.subject(&self.mg));
+        self.log_change(pre_op, OperationType::Update, None, update.additional_details)
+            .await;
+
+        // B47
+        let published = bounded(
+            self.deadlines.kubernetes,
+            self.r
+                .publisher
+                .publish_connection(&self.mg, &update.connection_details),
+        )
+        .await;
+        if let Err(e) = published {
+            return self
+                .report(
+                    Some(Event::warning(reason::CANNOT_PUBLISH, &e)),
+                    vec![Condition::reconcile_error(&e)],
                     Outcome::Requeue,
                 )
-                .await),
+                .await;
         }
-    }
 
-    /// X5: connector first, then client; failures only emit events.
-    async fn disconnect(&mut self, ext: &dyn DynExternal<M>) {
-        if let Err(e) = self.r.external.disconnect().await {
-            self.record
-                .event(&self.mg, Event::warning(reason::CANNOT_DISCONNECT, &e));
-        }
-        if let Err(e) = ext.disconnect().await {
-            self.record
-                .event(&self.mg, Event::warning(reason::CANNOT_DISCONNECT, &e));
-        }
-    }
-
-    /// B18-B21.
-    async fn observe(&mut self, ext: &dyn DynExternal<M>) -> Result<ExternalObservation, Result<Outcome>> {
-        let _ = (ext, self.r.timing.creation_grace, &self.r.clock);
-        todo!("R:1178-1222: observe under external deadline; observe-only absent -> B20; grace period -> B21")
-    }
-
-    /// B22-B29.
-    async fn delete_external(&mut self, ext: &dyn DynExternal<M>, obs: &ExternalObservation) -> Result<Outcome> {
-        let _ = (ext, obs, &self.r.finalizer, &self.r.change_logger);
-        todo!("R:1229-1321")
-    }
-
-    /// B30-B33: publish observed details, add the finalizer.
-    async fn publish_observed_and_finalize(&mut self, obs: &ExternalObservation) -> Step {
-        let _ = (obs, &self.r.publisher);
-        todo!("R:1324-1352")
-    }
-
-    /// B34-B41: pending annotation PUT, Create, critical annotations, publish. Rebuilds the
-    /// recorder with the new external name after Create (X7).
-    async fn create_external(&mut self, ext: &dyn DynExternal<M>) -> Result<Outcome> {
-        let _ = (
-            ext,
-            &self.r.critical_annotations,
-            Cow::<str>::Borrowed(ERR_UPDATE_MANAGED_ANNOTATIONS),
-        );
-        todo!("R:1355-1476")
-    }
-
-    /// S5, B42.
-    async fn late_initialize(&mut self, obs: &ExternalObservation) -> Step {
-        let _ = obs;
-        // TODO (R:1479-1494): the Update response overwrites the in-memory object, status
-        // included, as in Go. OPEN (docs/design/core.md): no ported case exercises that yet.
-        todo!()
-    }
-
-    /// B43.
-    async fn up_to_date(&mut self) -> Result<Outcome> {
-        let _ = &self.r.metrics;
-        todo!("R:1496-1514: record_first_time_ready, record_unchanged, success, RequeueAfter(poll)")
-    }
-
-    /// B46-B48.
-    async fn update_external(&mut self, ext: &dyn DynExternal<M>) -> Result<Outcome> {
-        let _ = ext;
-        todo!("R:1539-1586")
+        // B48
+        let poll = self.r.poll(&self.mg);
+        self.report(
+            Some(Event::normal(reason::UPDATED, MSG_UPDATED)),
+            vec![Condition::reconcile_success()],
+            Outcome::RequeueAfter(poll),
+        )
+        .await
     }
 }
