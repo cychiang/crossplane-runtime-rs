@@ -306,6 +306,29 @@ Unit 1.9, queue half (work queue, driver, rate limiters):
   controller-runtime controller and priority queue). Their markers and skips follow the same
   rules and are counted on a second summary line, never in the denominator's.
 
+Units 1.7 and 1.8 (ProviderConfig reconciler, safe-start gate):
+
+- `customresourcesgate::Reconciler` holds `Arc<dyn gate::SetGate<GroupVersionKind>>`, not
+  `Arc<Gate<..>>`. Go's `TestReconcile` swaps in a `MockGate` that records `Set` calls, and a
+  concrete `Gate` cannot be observed that way (`set` returns "changed" for an absent key whether
+  it was set true or false). `Gate` implements the one-method `SetGate`, so `setup` still passes
+  `o.gate.clone()` and `controller::Options` is unchanged.
+- `TransformStripCRDSchema` is `customresourcesgate::transform_strip_crd_schema(&mut dyn Object)`.
+  It mutates in place and ignores any kind but a CRD, where Go returns the object. Nothing calls
+  it yet: the informer cache (1.9) has no transform hook, and the baseline does not install it.
+- Gate callbacks run on `spawn_blocking` when a tokio runtime is current and on a new thread
+  otherwise, because a callback typically registers controllers and the caller of `register` or
+  `set` may be either.
+- The ProviderConfig reconciler ends the whole run at `TIMEOUT` with a deadline error, the same
+  open point as the managed reconciler (see its note). The legacy usage kind probe
+  (`legacyPCU`) is not ported: the label selector always carries the kind label.
+- `Setup` with a nil gate (G3) has no Rust counterpart: `Options::gate` is a non-optional `Arc`.
+- Extra tests with no Go case, in `providerconfig_test.rs`: verb order and bodies (get, list,
+  delete, PUT, status PUT on every pass), the list labels, the Terminating condition, and the
+  `UsageAccounting` warning events (type, reason, message) through a recording recorder. In
+  `gate_test.rs`: `Set`'s changed result, a key flipping back before a later register, a released
+  registration never rerunning, and a multi-task concurrency test.
+
 ## Verification
 
 Rerun these; each was run on the scaffold.
