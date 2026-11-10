@@ -620,3 +620,91 @@ async fn desired_state_changed_filters_status_writes_and_resyncs() {
     stop.cancel();
     running.await.unwrap().expect("the manager stops cleanly");
 }
+
+/// Two electors on one Lease, observed through the API: the first acquires, the second waits; the
+/// first stops without releasing (as controller-runtime leaves `ReleaseOnCancel` off) and the
+/// second takes over once the lease expires; an outside write of the holder makes the leader
+/// report the lease lost within the renew deadline.
+#[tokio::test]
+async fn a_second_elector_takes_over_an_abandoned_lease() {
+    use k8s_openapi::api::coordination::v1::Lease;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::manager::leader_election::Elector;
+
+    let Some(config) = rest_config("a_second_elector_takes_over_an_abandoned_lease").await else {
+        return;
+    };
+    let kube = config.into_kube_client().unwrap();
+    let direct = &KubeClient::uncached(kube.clone());
+    let (lease_duration, renew_deadline, retry) =
+        (Duration::from_secs(4), Duration::from_secs(3), Duration::from_secs(1));
+    in_namespace(direct, "lease", |ns| async move {
+        let elector = |id: &str| {
+            Elector::new(kube.clone(), &ns, "xprs-test-lease", id.to_owned(), lease_duration, renew_deadline, retry, None).unwrap()
+        };
+        let api: kube::Api<Lease> = kube::Api::namespaced(kube.clone(), &ns);
+        let spec = || async { api.get("xprs-test-lease").await.unwrap().spec.unwrap() };
+
+        let mut first = elector("first");
+        let mut second = elector("second");
+        let stop_first = CancellationToken::new();
+        assert!(first.acquire(&stop_first).await, "the first elector creates the lease");
+        let held = spec().await;
+        assert_eq!(
+            (held.holder_identity.as_deref(), held.lease_duration_seconds, held.lease_transitions),
+            (Some("first"), Some(4), Some(0))
+        );
+
+        let renewing = tokio::spawn({
+            let stop = stop_first.clone();
+            async move { first.renew(&stop).await }
+        });
+        let stop_second = CancellationToken::new();
+        let waiting = tokio::spawn({
+            let stop = stop_second.clone();
+            async move {
+                let won = second.acquire(&stop).await;
+                (won, std::time::Instant::now(), second)
+            }
+        });
+        tokio::time::sleep(lease_duration + retry).await;
+        assert!(!waiting.is_finished(), "the second elector waits while the first renews");
+        let renewed = spec().await;
+        assert!(renewed.renew_time > held.renew_time, "the first elector renewed");
+
+        stop_first.cancel();
+        let stopped = std::time::Instant::now();
+        assert!(!renewing.await.unwrap(), "a cancelled leader does not report a loss");
+        let (won, at, mut second) = waiting.await.unwrap();
+        let takeover = at - stopped;
+        let after = spec().await;
+        eprintln!(
+            "lease: takeover {takeover:?} after the leader stopped (lease {lease_duration:?}, retry {retry:?}); holder {:?}, transitions {:?}",
+            after.holder_identity, after.lease_transitions
+        );
+        assert!(won);
+        assert_eq!((after.holder_identity.as_deref(), after.lease_transitions), (Some("second"), Some(1)));
+        assert!(takeover <= lease_duration + retry.mul_f64(2.2) + Duration::from_secs(1), "{takeover:?}");
+
+        let renewing = tokio::spawn({
+            let stop = stop_second.clone();
+            async move { second.renew(&stop).await }
+        });
+        loop {
+            let mut stolen = api.get("xprs-test-lease").await.unwrap();
+            stolen.spec.as_mut().unwrap().holder_identity = Some("intruder".into());
+            match api.replace("xprs-test-lease", &Default::default(), &stolen).await {
+                Ok(_) => break,
+                Err(kube::Error::Api(s)) if s.code == 409 => continue,
+                Err(e) => panic!("steal: {e}"),
+            }
+        }
+        let stolen_at = std::time::Instant::now();
+        let lost = tokio::time::timeout(renew_deadline * 3, renewing).await.expect("loss reported").unwrap();
+        eprintln!("lease: loss reported {:?} after the holder was overwritten", stolen_at.elapsed());
+        assert!(lost, "the leader reports the lease lost");
+        assert_eq!(spec().await.holder_identity.as_deref(), Some("intruder"), "and does not take it back");
+    })
+    .await;
+}

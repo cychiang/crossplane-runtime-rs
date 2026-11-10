@@ -23,7 +23,7 @@ use k8s_openapi::api::core::v1::Event as CoreEvent;
 use leader_election::Elector;
 
 #[path = "leader_election.rs"]
-mod leader_election;
+pub(crate) mod leader_election;
 
 /// How to reach the API server, and how fast. [`RestConfig::infer`] is the only public
 /// constructor and [`Manager::new`] the only consumer, so every request in the process carries
