@@ -251,3 +251,86 @@ async fn the_recorder_writes_one_event_and_patches_its_count() {
     })
     .await;
 }
+
+/// Polls `read` until it returns `Some`, for at most five seconds.
+pub(crate) async fn eventually<T, Fut: Future<Output = Option<T>>>(what: &str, mut read: impl FnMut() -> Fut) -> T {
+    for _ in 0..100 {
+        if let Some(v) = read().await {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn the_cache_serves_reads_and_follows_writes() {
+    use crossplane_core::client::ListOptions;
+
+    use crate::cache::Cache;
+
+    let Some(config) = rest_config("the_cache_serves_reads_and_follows_writes").await else {
+        return;
+    };
+    let kube = config.into_kube_client().unwrap();
+    let direct = &KubeClient::uncached(kube.clone());
+    let cache = Cache::new(kube.clone(), Duration::ZERO);
+    let cached = &KubeClient::new(kube, cache.clone());
+    in_namespace(direct, "cache", |ns| async move {
+        let (direct, cached): (&dyn Client, &dyn Client) = (direct, cached);
+        let mut a = config_map(&ns, "a");
+        direct.create(&mut a).await.unwrap();
+
+        let got: ConfigMap = eventually("a in the cache", || async {
+            cached.get_as::<ConfigMap>(&ObjectKey::namespaced(&ns, "a")).await.ok()
+        })
+        .await;
+        assert_eq!(got.metadata.uid, a.metadata.uid);
+
+        let missing = cached
+            .get_as::<ConfigMap>(&ObjectKey::namespaced(&ns, "missing"))
+            .await
+            .unwrap_err();
+        assert!(missing.is_not_found());
+        assert_eq!(
+            missing.to_string(),
+            r#"ConfigMap "missing" not found"#,
+            "Go's cache reader text"
+        );
+
+        a.data = Some([("k".to_owned(), "v".to_owned())].into());
+        direct.update(&mut a).await.unwrap();
+        let rv = a.metadata.resource_version.clone();
+        eventually("the update in the cache", || async {
+            let got: ConfigMap = cached.get_as(&ObjectKey::namespaced(&ns, "a")).await.ok()?;
+            (got.metadata.resource_version == rv).then_some(())
+        })
+        .await;
+
+        let mut b = config_map(&ns, "b");
+        direct.create(&mut b).await.unwrap();
+        let in_ns = ListOptions {
+            namespace: Some(ns.clone()),
+            ..Default::default()
+        };
+        let names = eventually("both in a cached list", || async {
+            let listed: Vec<ConfigMap> = cached.list_as(&in_ns).await.ok()?;
+            let names: Vec<_> = listed.into_iter().filter_map(|c| c.metadata.name).collect();
+            (names.len() >= 3).then_some(names)
+        })
+        .await;
+        assert_eq!(names, ["a", "b", "kube-root-ca.crt"], "the API server's order");
+
+        direct.delete(&b).await.unwrap();
+        eventually("the delete in the cache", || async {
+            cached
+                .get_as::<ConfigMap>(&ObjectKey::namespaced(&ns, "b"))
+                .await
+                .err()
+                .filter(|e| e.is_not_found())
+        })
+        .await;
+    })
+    .await;
+    cache.stop();
+}
