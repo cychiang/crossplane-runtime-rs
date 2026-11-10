@@ -18,6 +18,10 @@ mod metrics;
 pub mod policy;
 
 #[cfg(test)]
+mod policy_test;
+#[cfg(test)]
+mod reconciler_annotations_test;
+#[cfg(test)]
 mod reconciler_modern_test;
 
 use std::ops::ControlFlow;
