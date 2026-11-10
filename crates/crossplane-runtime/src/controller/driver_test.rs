@@ -117,7 +117,11 @@ impl Harness {
 
     /// The next reconcile and how long after `since` it started.
     async fn reconciled(&mut self, since: Instant) -> (Request, Duration) {
-        let (req, at) = self.calls.recv().await.expect("the reconciler is called");
+        let next = tokio::time::timeout(Duration::from_secs(24 * 3600), self.calls.recv());
+        let (req, at) = next
+            .await
+            .expect("the reconciler is called within a day: is the key stuck?")
+            .expect("the reconciler is still there");
         (req, at - since)
     }
 
@@ -424,7 +428,10 @@ async fn a_dropped_reconcile_releases_its_key() {
 
     queue.add(request());
     assert_eq!(
-        queue.get().await,
+        tokio::time::timeout(Duration::from_secs(24 * 3600), queue.get())
+            .await
+            .ok()
+            .flatten(),
         Some(request()),
         "the key is not stuck in the held set"
     );

@@ -78,11 +78,8 @@ impl RateLimiter for ItemExponentialBackoff {
             *exp += 1;
             *exp - 1
         };
-        // Go computes in float64 so that a large failure count saturates instead of overflowing.
+        // Float, as in Go, so a large failure count saturates (the cast does) instead of overflowing.
         let backoff = self.base.as_nanos() as f64 * 2f64.powi(exp);
-        if backoff > i64::MAX as f64 {
-            return self.max;
-        }
         Duration::from_nanos(backoff as u64).min(self.max)
     }
 
@@ -96,7 +93,7 @@ const INF_DURATION: Duration = Duration::from_nanos(i64::MAX as u64);
 
 /// client-go `BucketRateLimiter` over `golang.org/x/time/rate.Limiter`. `when` is
 /// `Limiter.Reserve().Delay()`: it always takes a token, letting the bucket go negative, and never
-/// gives it back (`util/workqueue/default_rate_limiters.go:68-70`, `rate/rate.go:337-381`).
+/// gives it back (`util/workqueue/default_rate_limiters.go:68-70`, `rate/rate.go:207-209,337-381`).
 struct TokenBucket {
     rps: f64,
     burst: u32,
@@ -175,7 +172,7 @@ impl<R: Reconcile> Reconciler<R> {
         }
     }
 
-    /// Go `Reconciler.when` (`pkg/ratelimiter/reconciler.go:69-98`).
+    /// Go `Reconciler.when` (`pkg/ratelimiter/reconciler.go:65-98`).
     fn when(&self, req: &Request) -> Duration {
         if self.limited.lock().unwrap().remove(req) {
             return Duration::ZERO;
