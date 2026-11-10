@@ -4,10 +4,28 @@ The parity harness runs one set of chainsaw scenarios against a provider on a
 pinned kind cluster. It collects three artifacts per run. A Go run and a Rust
 run are then compared. The Go half exists first, so its run is the baseline.
 
+## How to reproduce the parity result
+
+```bash
+parity/scripts/parity.sh
+```
+
+It needs Docker, kind, kubectl, helm, jq, Go, the `crossplane` CLI, the `xp-provider-gen` binary (`XP_PROVIDER_GEN`)
+and a provider-template-rs checkout beside this repository (`TEMPLATE_DIR`). From nothing it builds the Go baseline
+and the Rust template xpkg, brings up the kind cluster, installs the Go provider and records run `parity-go`, installs
+the Rust provider and records run `parity-rust`, then runs `trace-diff` on the two with `allow/go-vs-rust.jsonl`. It
+prints the differ's report and exits with its status: 0 when the runs are equal apart from the allowances, 1 when they
+differ. It exits 1 without diffing when the Go run fails a scenario. The cluster stays up with the Rust provider
+installed; `parity/scripts/down.sh` deletes it. From a deleted cluster, with warm Go, Cargo and Docker build caches, it took 23 minutes (1382s) on an arm64 Mac, most of it the two runs of fifteen scenarios.
+
+A Go-against-Rust diff means something only because Go-against-Go diffs are empty. To check that, record more Go
+runs and diff them with no allowance file, as described under Commands.
+
 ## Commands
 
 ```bash
-parity/scripts/baseline.sh go-1         # all four steps below in one command
+parity/scripts/parity.sh                # the whole Go-against-Rust comparison, see above
+parity/scripts/baseline.sh go-1         # the next four steps in one command
 parity/scripts/make-go-baseline.sh      # regenerate, overlay and build the Go provider; prints the xpkg path
 parity/scripts/up.sh                    # kind cluster, Crossplane core, fake external service
 parity/scripts/install-provider.sh provider-baseline \
@@ -129,7 +147,7 @@ level, so chainsaw's own steps stay visible as markers.
 | `no-update` | Policies without Update: a spec change is observed (`observedGeneration` 2) but the thing keeps its value. Delete still deletes it (B45, B24, B29) |
 | `no-delete` | Policies without Delete: deleting the MR leaves the created thing in place (B41, then B10) |
 | `policy-edges` | On a missing thing, `[Observe]` reports `observe failed: external resource does not exist` (B20), `[Observe, Update]` reports success without creating (B44), and `[Delete]` is rejected as unsupported before any call (B05) |
-| `create-pending` | A simulation: an MR created with `external-create-pending` already set is refused with `cannot determine creation result ...` and nothing is called (B13). Removing only that annotation triggers no reconcile, because the event filter ignores it. A label change does, and the create goes ahead (B41) |
+| `create-pending` | A simulation: an MR created with `external-create-pending` already set is refused with `cannot determine creation result ...` and nothing is called (B13). Removing only that annotation triggers no reconcile, because the event filter ignores it. A label change does, and the create goes ahead (B41). The test waits 5s before removing the annotation: in go-f the refusal's status write got a 409, which Go turns into a requeue (spec X1), and that requeue landed after the removal and created the thing on its own. Deleting soon after the create also reaches B21 |
 | `providerconfig-in-use` | Deleting a ProviderConfig an MR uses leaves it with its finalizer, `users: 1` and `Terminating=True/InUse` (PC4). Deleting the MR releases and deletes it (PC6) |
 | `default-providerconfig-ref` | An MR without `providerConfigRef` gets the CRD default `ClusterProviderConfig`, which this provider lacks, so Connect fails with `connect failed: unsupported provider config kind: ClusterProviderConfig` (B17). Pointing it at the namespaced ProviderConfig fixes it |
 | `poll-interval` | With `crossplane.io/poll-interval: 5s`, a value changed behind the provider's back is put back within 30s, well inside the default 1m poll (B43, then B48) |
@@ -139,6 +157,17 @@ is covered by `pause`. The `crossplane.io/reconcile-requested-at` annotation is 
 `MyType` cannot record reconcile tokens (spec section 3), so the annotation only triggers an ordinary reconcile.
 Faults match by method and name, so a PUT fault injected after the thing exists fails only the update. A scenario
 never reads a thing through the proxy while a GET fault is pending on it, because that read would consume the fault.
+
+Chainsaw waits 2s after a test before cleanup (`delayBeforeCleanup` in `scenarios/chainsaw.yaml`). Without it the
+trace ended while the ProviderConfig controller was still busy. Once an MR is gone, its usage goes too and the
+ProviderConfig is reconciled twice within about 15ms: one round writes `users: 0`, and the status change triggers a
+second round that writes the same again. Cleanup deleted the ProviderConfig 0 to 200ms after the MR was gone. When the
+delete landed inside the second round, that round's update or status write failed with 409 and its other write was
+never sent (spec 4.1 PC7 and PC8). Failed writes are not compared, so one run then had a write fewer. In rust-5 this
+happened in `pause` and `default-providerconfig-ref`: the gap from the provider's last ProviderConfig write to the
+delete was 1 and 2ms, against 32 to 36ms for the same tests in go-e to go-j. Go's own ProviderConfig 409s follow the
+same code path: in go-f, go-g and go-h the reconcile that got the 409 wrote no status, and a reconcile 1ms later wrote
+the identical pair, which the collapse rule then merged.
 
 Each test runs in its own fixed namespace with its own Secret and namespaced ProviderConfig. Each manifest except
 `default-providerconfig-ref` sets `providerConfigRef.kind: ProviderConfig`, because the CRD default
@@ -166,7 +195,9 @@ of the recorded runs are empty.
   or usage fails unless an allowance names it. `username` and `userAgent` are not compared.
 - **failed writes.** Non-2xx writes are listed per run and never compared. Go's 409s come from informer-cache staleness
   and land on a different object in each run: go-1 had two ProviderConfig 409s, go-2 one, go-fresh one MR status 409,
-  go-a one MR update 409, go-b none, go-c one MR status 409, go-fresh-b one ProviderConfig 409.
+  go-a one MR update 409, go-b none, go-c one MR status 409, go-fresh-b one ProviderConfig 409. With the fifteen scenarios,
+  go-e had one MR status 409, go-g two ProviderConfig 409s, go-h three MR status and one ProviderConfig 409, go-i four
+  MR status 409s and go-j one MR status 409. In go-f a 409 also changed the outcome of a scenario: see `create-pending`.
 - **events.** Keyed by `(involved object, type, reason)`. The set of keys and each key's set of normalized messages
   must match. Counts, event names and timestamps are client-go correlator output and are not compared. A patch is
   joined to its create by event name.
