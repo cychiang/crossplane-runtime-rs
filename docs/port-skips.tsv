@@ -46,3 +46,13 @@ sigs.k8s.io/controller-runtime/pkg/internal/controller	TestSource	Processing que
 sigs.k8s.io/controller-runtime/pkg/internal/controller	TestSource	Processing queue items from a Controller should use the priority from Result with RequeueAfter	Result.Priority and AddOpts.Priority are not ported (cross-object ordering only)
 sigs.k8s.io/controller-runtime/pkg/internal/controller	TestSource	Processing queue items from a Controller should retain the priority when there was an error	Result.Priority and AddOpts.Priority are not ported (cross-object ordering only)
 sigs.k8s.io/controller-runtime/pkg/internal/controller	TestSource	Processing queue items from a Controller should use the priority from Result when there was an error	Result.Priority and AddOpts.Priority are not ported (cross-object ordering only)
+pkg/resource	TestAddProviderConfig	NotProviderConfigReferencer	Go passes a nil runtime.Object to a type switch that matches nothing. EnqueueRequestForProviderConfig is an EventHandler<U> with U: ProviderConfigUsage, so a non-usage object cannot reach it; the compiler rejects what the Go test asserts is ignored.
+pkg/resource	TestConnectionSecretFor	Success	Cluster-scoped ConnectionSecretOwner with a SecretReference that names its own namespace. Only legacy managed resources use it; modern ones have local_connection_secret_for.
+pkg/resource	TestGetKind	KindFound	GetKind and MustGetKind ask a runtime.ObjectTyper (the scheme) for an object's kinds. Rust has no scheme: ObjectType::of::<K>() is the kind, and it cannot be unknown, unversioned or ambiguous.
+pkg/resource	TestGetKind	KindError	Same as KindFound: the error comes from the scheme's ObjectKinds, which has no Rust counterpart.
+pkg/resource	TestGetKind	KindIsUnversioned	Same as KindFound: an unversioned object is a scheme concept.
+pkg/resource	TestGetKind	NotEnoughKinds	Same as KindFound: the number of kinds registered for a Go type is a scheme concept.
+pkg/resource	TestGetKind	TooManyKinds	Same as KindFound: the number of kinds registered for a Go type is a scheme concept.
+pkg/resource	TestMustCreateObject	KindRegistered	MustCreateObject calls runtime.ObjectCreater.New(kind) on a scheme. Rust has no scheme; ObjectType::decode is the decoder, covered by object.rs tests.
+pkg/resource	TestIsNotControllable	NilError	A nil error cannot be built: is_not_controllable takes &Error, and Result::Ok is not an Error. The predicate is exercised on a plain error and a marked one.
+pkg/resource	TestIsAPIErrorWrapped	NoError	Same as IsNotControllable/NilError: is_api_error_wrapped takes &Error.
