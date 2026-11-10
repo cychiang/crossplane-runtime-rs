@@ -176,7 +176,7 @@ fn crossplane_per_item_backoff_is_1s_to_60s() {
 
 #[tokio::test(start_paused = true)]
 async fn bucket_allows_burst_then_spaces_reservations() {
-    let bucket = TokenBucket::new(10, 100);
+    let bucket = TokenBucket::new(10.0, 100);
     let any = item("any");
     for n in 0..100 {
         assert_eq!(bucket.when(&any), Duration::ZERO, "token {n} of the burst");
@@ -200,7 +200,7 @@ async fn bucket_allows_burst_then_spaces_reservations() {
 
 #[tokio::test(start_paused = true)]
 async fn bucket_refill_is_capped_at_burst() {
-    let bucket = TokenBucket::new(1, 10);
+    let bucket = TokenBucket::new(1.0, 10);
     let any = item("any");
     for _ in 0..10 {
         bucket.when(&any);
@@ -214,14 +214,14 @@ async fn bucket_refill_is_capped_at_burst() {
 
 #[test]
 fn bucket_with_zero_rate_never_grants() {
-    assert_eq!(TokenBucket::new(0, 0).when(&item("any")), INF_DURATION);
+    assert_eq!(TokenBucket::new(0.0, 0).when(&item("any")), INF_DURATION);
 }
 
 /// Go's wrapper asks the bucket once per pass: a request held back once is let through without a
 /// second reservation when it returns, so it pays exactly one token.
 #[tokio::test(start_paused = true)]
 async fn global_limiter_charges_a_held_back_request_once() {
-    let global = Arc::new(TokenBucket::new(1, 1));
+    let global = Arc::new(TokenBucket::new(1.0, 1));
     let r = Reconciler::new("test", Returns(Outcome::Done), global.clone());
     let (a, b) = (item("a"), item("b"));
 

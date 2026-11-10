@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{KubeClient, connect, convert_error};
+use crate::ratelimiter::Throttle;
 
 #[test]
 fn kube_errors_keep_their_status_reason() {
@@ -162,7 +163,7 @@ async fn kube_client_against_a_real_api_server() {
     let config = kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
         .await
         .expect("usable kubeconfig");
-    let client = KubeClient::uncached(connect(config, USER_AGENT).expect("client"));
+    let client = KubeClient::uncached(connect(config, USER_AGENT, Throttle::new(1000.0, 1000)).expect("client"));
     let ns = format!("xprs-kube-client-{}", std::process::id());
 
     let mut namespace = Namespace {

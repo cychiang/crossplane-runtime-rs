@@ -27,6 +27,8 @@
 
 mod cache;
 mod kube_client;
+#[cfg(test)]
+mod live_test;
 
 pub mod clock;
 pub mod controller;

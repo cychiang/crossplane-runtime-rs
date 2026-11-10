@@ -17,7 +17,12 @@ k8s-openapi.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 http.workspace = true
-tokio.workspace = true
+tower.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+hostname.workspace = true
+tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -26,4 +31,4 @@ prometheus.workspace = true
 [dev-dependencies]
 crossplane-test.workspace = true
 serde.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "io-util"] }

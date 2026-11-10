@@ -371,6 +371,36 @@ Unit 1.5 (`pkg/resource`):
 - Skipped rows are in `docs/port-skips.tsv`: `GetKind` and `MustCreateObject` (scheme),
   `ConnectionSecretFor` (cluster-scoped owner), `NotProviderConfigReferencer` (type switch), and
   the two nil-error rows.
+Unit 1.9, rest (RestConfig, cache, manager, builder, event recorder, statemetrics):
+
+- `kube_client::connect` takes a third argument, `Throttle`, a tower layer that is client-go's
+  token bucket (QPS 5, burst 10). Watches skip it, as client-go's `Watch` has no rate limiter
+  (`cg:rest/request.go:758-765` vs `:1054`). `RestConfig::infer(binary, version)` and
+  `into_kube_client` are the only way to a client, so every request carries the throttle.
+- The User-Agent has client-go's shape with Go's OS and architecture names. Its version is the
+  provider's, not client-go's build version, and the commit is always `unknown`: a Rust binary
+  has no client-go version to report. Live: `crossplane_runtime-<hash>/v0.0.0 (darwin/arm64)
+  kubernetes/unknown` in the audit log.
+- `ApiRecorder` feeds a bounded channel of 1000 and drops with an error log when full, Go's
+  `maxQueuedEvents` broadcaster queue. The correlator, spam filter and sink retry are client-go's
+  `tools/record` (28 of its tests ported, in `docs/port-extra.tsv`). Two wire differences: with
+  no patch a record is created directly where Go calls `Patch` with a nil patch first, and a
+  null `eventTime` is left out where Go sends `"eventTime":null`.
+- The cache has no `ErrCacheNotStarted`: an informer starts on the first read or subscription,
+  before or after `Manager::start`. Go's cache refuses reads before start; a provider never reads
+  before start, so nothing observable changes.
+- `controller_runtime_*` and `workqueue_*` metrics are not ported. The metrics endpoint serves
+  only what a provider registers (`crossplane_managed_resource_*` and the managed reconciler's).
+- The manager's elector is written here, client-go's `tryAcquireOrRenew` over a PUT with the
+  resourceVersion, rather than `kube-lease-manager`, which judges expiry from the server's
+  `renewTime` against the local clock and renews without a resourceVersion
+  (`leader_election.rs` module doc).
+- The builder's live test uses a test-local copy of `DesiredStateChanged` and a test-local
+  ProviderConfigUsage-shaped handler, because `resource::predicates` and
+  `EnqueueRequestForProviderConfig` belong to unit 1.5 and are `todo!()` on this branch. Rerun it
+  with the real ones after the merge.
+- `#![allow(dead_code)]` stays in `crossplane-runtime/src/lib.rs`: the remaining `todo!()`s are
+  other units' (1.5, 1.6, 1.7, 1.8).
 
 ## Verification
 
@@ -389,6 +419,10 @@ Rerun these; each was run on the scaffold.
 - Unit 1.9 queue half: the `controller::workqueue`, `controller::driver` and `ratelimiter` tests,
   including a multi-thread stress test (6 producers, 8 workers, 4 keys) asserting no overlapping
   reconcile of one key and no lost add. Timing tests run on tokio's paused clock.
+- Unit 1.9 rest: unit tests in `cache_test.rs`, `event_test.rs`, `manager_test.rs`,
+  `statemetrics_test.rs`; live tests in `live_test.rs`, skipped unless `XPRS_TEST_KUBECONFIG`
+  names a cluster (`XPRS_TEST_AUDIT_LOG` adds the audit checks). They create only `xprs-*`
+  namespaces.
 
 ## Open questions and risks
 
@@ -415,10 +449,20 @@ None of these is resolved by the scaffold.
 3. Is the reconcile-request default right? `Managed::TRACKS_RECONCILE_REQUESTS` is off unless
    the derive is told otherwise, which matches the Go baseline; on is what a user of
    `status.lastHandledReconcileAt` expects.
-4. Deletions missed across a relist: does the informer synthesize delete events for objects that
-   vanished while the watch was down, as client-go's `DeletedFinalStateUnknown` does?
-5. The event correlator is unimplemented. Which of client-go's aggregation and spam-filter rules
-   are observable in the parity traces?
+4. Answered (unit 1.9). Yes, with the last known object. client-go v0.36 replaces the store
+   atomically on a relist and sends a delete for every vanished key before the list's updates
+   (`processReplacedAllInfo`, `cg:tools/cache/controller.go:756-800`); the Rust store does the
+   same on kube's `Init..InitDone`, tested in `cache_test.rs`. Each subscriber's queue is
+   unbounded, as client-go's `processorListener` buffer is (`shared_informer.go:1223-1228`), so a
+   slow controller loses no event. Cached reads also bring back Go's 409 pattern: a write made
+   from a cached read can conflict with the installed provider's newer status write, which the
+   builder live test hit and retries.
+5. Answered (unit 1.9). Implemented as client-go's. Observable: the first event is a create,
+   repeats within ten minutes are a patch of `count`, `lastTimestamp` and `message` (live: 12
+   identical events gave 1 create and 11 patches in the audit log, the Go baseline's shape).
+   Aggregation into "(combined from similar events)" needs 10 distinct messages with one reason
+   in ten minutes, and the spam filter 25 events per object in a burst. The audit policy keeps
+   no request bodies, so whether a parity run reaches either is not known from the traces.
 6. Driver side answered (unit 1.9): the driver adds no reconcile timeout, because
    controller-runtime's `ReconciliationTimeout` is unset in the baseline; the managed reconciler
    owns the timeout. What the driver guarantees is that a key is released on every exit path

@@ -12,6 +12,7 @@ use futures::future::BoxFuture;
 use kube::api::{Api, DeleteParams, DynamicObject, ListParams, Patch as KubePatch, PatchParams, PostParams};
 
 use crate::cache::Cache;
+use crate::ratelimiter::Throttle;
 
 pub(crate) struct KubeClient {
     kube: kube::Client,
@@ -24,12 +25,14 @@ enum Reads {
     Direct,
 }
 
-/// Builds the one `kube::Client` a process uses, sending `user_agent` on every request. Go sets
-/// it through `rest.Config.UserAgent`; kube has no such field, so it is a default header.
-pub(crate) fn connect(mut config: kube::Config, user_agent: &str) -> Result<kube::Client> {
+/// Builds a `kube::Client`, sending `user_agent` on every request and waiting on `throttle`
+/// before each non-watch request. Go sets these through `rest.Config.UserAgent`, `QPS` and
+/// `Burst`; kube has no such fields, so they are a default header and a tower layer.
+pub(crate) fn connect(mut config: kube::Config, user_agent: &str, throttle: Throttle) -> Result<kube::Client> {
     let value = http::HeaderValue::from_str(user_agent).map_err(Error::foreign)?;
     config.headers.push((http::header::USER_AGENT, value));
-    kube::Client::try_from(config).map_err(convert_error)
+    let builder = kube::client::ClientBuilder::try_from(config).map_err(convert_error)?;
+    Ok(builder.with_layer(&throttle).build())
 }
 
 impl KubeClient {

@@ -55,3 +55,31 @@ sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	1048	T
 sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	1077	TestSource	Processing queue items from a Controller should perform error behavior if error is not nil, regardless of RequeueAfter
 sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	1106	TestSource	Processing queue items from a Controller should retain the priority when there was an error
 sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	1135	TestSource	Processing queue items from a Controller should use the priority from Result when there was an error
+k8s.io/client-go/tools/record	events_cache_test.go	135	TestEventAggregatorByReasonFunc	(no table)
+k8s.io/client-go/tools/record	events_cache_test.go	156	TestEventAggregatorByReasonMessageFunc	(no table)
+k8s.io/client-go/tools/record	events_cache_test.go	182	TestEventCorrelator	create-a-single-event
+k8s.io/client-go/tools/record	events_cache_test.go	188	TestEventCorrelator	the-same-event-should-just-count
+k8s.io/client-go/tools/record	events_cache_test.go	194	TestEventCorrelator	the-same-event-should-just-count-even-if-more-than-aggregate
+k8s.io/client-go/tools/record	events_cache_test.go	200	TestEventCorrelator	the-same-event-is-spam-if-happens-too-frequently
+k8s.io/client-go/tools/record	events_cache_test.go	206	TestEventCorrelator	create-many-unique-events
+k8s.io/client-go/tools/record	events_cache_test.go	212	TestEventCorrelator	similar-events-should-aggregate-event
+k8s.io/client-go/tools/record	events_cache_test.go	218	TestEventCorrelator	similar-events-many-times-should-count-the-aggregate
+k8s.io/client-go/tools/record	events_cache_test.go	224	TestEventCorrelator	events-from-different-containers-do-not-aggregate
+k8s.io/client-go/tools/record	events_cache_test.go	230	TestEventCorrelator	similar-events-whose-interval-is-greater-than-aggregate-interval-do-not-aggregate
+k8s.io/client-go/tools/record	events_cache_test.go	310	TestEventSpamFilter	event should be reported as spam if object reference is the same for default spam filter
+k8s.io/client-go/tools/record	events_cache_test.go	314	TestEventSpamFilter	event should not be reported as spam if object reference is the same, but reason is different for custom spam filter
+k8s.io/client-go/tools/record	events_cache_test.go	320	TestEventSpamFilter	event should  be reported as spam if object reference and reason is the same, but message is different for custom spam filter
+k8s.io/client-go/tools/record	event_test.go	123	TestBroadcasterShutdown	(no table)
+k8s.io/client-go/tools/record	event_test.go	153	TestStartEventWatcherExitsOnDirectShutdown	(no table)
+k8s.io/client-go/tools/record	event_test.go	167	TestNonRacyShutdown	(no table)
+k8s.io/client-go/tools/record	event_test.go	190	TestEventf	(no table)
+k8s.io/client-go/tools/record	event_test.go	510	TestWriteEventError	giveUp1
+k8s.io/client-go/tools/record	event_test.go	515	TestWriteEventError	giveUp2
+k8s.io/client-go/tools/record	event_test.go	520	TestWriteEventError	retry1
+k8s.io/client-go/tools/record	event_test.go	525	TestWriteEventError	retry2
+k8s.io/client-go/tools/record	event_test.go	530	TestWriteEventError	succeedEventually
+k8s.io/client-go/tools/record	event_test.go	564	TestUpdateExpiredEvent	(no table)
+k8s.io/client-go/tools/record	event_test.go	604	TestCancelEvent	(no table)
+k8s.io/client-go/tools/record	event_test.go	631	TestLotsOfEvents	(no table)
+k8s.io/client-go/tools/record	event_test.go	687	TestEventfNoNamespace	(no table)
+k8s.io/client-go/tools/record	event_test.go	783	TestMultiSinkCache	(no table)
