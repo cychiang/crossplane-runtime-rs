@@ -375,6 +375,14 @@ fn modern_managed_has_the_go_fake_accessors() {
     assert_eq!(wire["spec"]["managementPolicies"], json!(["Observe", "Create"]));
     assert_eq!(wire["status"]["conditions"][0]["type"], "Ready");
 
+    assert_eq!((mg.observed_generation(), mg.last_handled_reconcile_at()), (0, ""));
+    mg.set_observed_generation(4);
+    mg.set_last_handled_reconcile_at("token");
+    assert_eq!((mg.observed_generation(), mg.last_handled_reconcile_at()), (4, "token"));
+    let wire = mg.to_json().unwrap();
+    assert_eq!(wire["status"]["observedGeneration"], 4);
+    assert_eq!(wire["status"]["lastHandledReconcileAt"], "token");
+
     mg.set_provider_config_reference(None);
     assert_eq!(mg.provider_config_reference(), None);
     assert_eq!(fake::as_modern_managed(&mut mg, 9).metadata.generation, Some(9));

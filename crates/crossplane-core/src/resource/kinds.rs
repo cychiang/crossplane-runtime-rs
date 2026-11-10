@@ -55,6 +55,25 @@ pub trait Managed: Kind + Resource<Scope = NamespaceResourceScope> {
         self.managed_spec_mut().management_policies = p;
     }
 
+    /// Go `ObservedStatus.GetLastHandledReconcileAt`. Go has it only on kinds that embed
+    /// `ObservedStatus`; the reconciler reads it only when `TRACKS_RECONCILE_REQUESTS` is set.
+    fn last_handled_reconcile_at(&self) -> &str {
+        self.managed_status()
+            .map_or("", |s| s.observed.last_handled_reconcile_at.as_str())
+    }
+
+    fn set_last_handled_reconcile_at(&mut self, token: impl Into<String>) {
+        self.managed_status_mut().observed.last_handled_reconcile_at = token.into();
+    }
+
+    fn observed_generation(&self) -> i64 {
+        self.managed_status().map_or(0, |s| s.observed.observed_generation)
+    }
+
+    fn set_observed_generation(&mut self, generation: i64) {
+        self.managed_status_mut().observed.observed_generation = generation;
+    }
+
     fn get_condition(&self, ct: &ConditionType) -> Condition {
         match self.managed_status() {
             Some(status) => status.conditioned.get_condition(ct),

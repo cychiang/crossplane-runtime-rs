@@ -189,7 +189,6 @@ async fn scenarios(client: &KubeClient, ns: &str) {
     let client: &dyn Client = client;
     let key = ObjectKey::namespaced(ns, "a");
 
-    // Create, then get.
     let mut created = my_type(ns, "a", &[]);
     client.create(&mut created).await.expect("create");
     assert!(
@@ -209,7 +208,6 @@ async fn scenarios(client: &KubeClient, ns: &str) {
     let already = client.create(&mut my_type(ns, "a", &[])).await.unwrap_err();
     assert!(already.is_already_exists(), "second create: {already:?}");
 
-    // Update is a PUT whose response overwrites the object, status included (parity spec S5).
     let mut obj = settled(client, &key).await;
     let stale = obj.clone();
     let server_status = obj.status.clone();
@@ -230,13 +228,10 @@ async fn scenarios(client: &KubeClient, ns: &str) {
         "after update the object holds the server's spec and generation"
     );
 
-    // A write carrying a stale resourceVersion is a Conflict.
     let conflict = client.update(&mut stale.clone()).await.unwrap_err();
     assert!(conflict.is_conflict(), "stale update: {conflict:?}");
     assert!(conflict.wrap("cannot update managed resource").is_conflict());
 
-    // Update status is a PUT to /status: it writes only status, and its response reverts a spec
-    // edit made in memory.
     let mut obj = settled(client, &key).await;
     let generation = obj.metadata.generation;
     obj.spec["forProvider"]["configurableField"] = json!("never-persisted");
@@ -258,7 +253,6 @@ async fn scenarios(client: &KubeClient, ns: &str) {
     assert_eq!(field(&fresh, "/spec/forProvider/configurableField"), "b");
     assert_eq!(field(&fresh, "/status/atProvider/configurableField"), "observed");
 
-    // Get of a missing object is NotFound, and stays so through a wrap.
     let missing = client
         .get_as::<MyType>(&ObjectKey::namespaced(ns, "missing"))
         .await
@@ -270,7 +264,6 @@ async fn scenarios(client: &KubeClient, ns: &str) {
         r#"cannot get managed resource: mytypes.sample.example.com "missing" not found"#
     );
 
-    // Merge patch.
     let mut obj: MyType = client.get_as(&key).await.unwrap();
     let before = obj.metadata.resource_version.clone();
     client
@@ -289,7 +282,6 @@ async fn scenarios(client: &KubeClient, ns: &str) {
     let fresh: MyType = client.get_as(&key).await.unwrap();
     assert_eq!(label(&fresh, "patched").as_deref(), Some("merge"));
 
-    // Server-side apply with a field owner; a second owner conflicts unless it forces.
     let apply = |owner: &str, force: bool| Patch::Apply {
         body: json!({
             "apiVersion": "sample.example.com/v1alpha1",
@@ -329,7 +321,6 @@ async fn scenarios(client: &KubeClient, ns: &str) {
     assert_eq!(label(&obj, "owner").as_deref(), Some("two"));
     assert!(managers(&obj).contains(&("xprs-test-two".into(), "Apply".into())));
 
-    // List with a label selector in a namespace, and across namespaces.
     let team = ns.to_owned();
     for (name, value) in [("b", team.as_str()), ("c", "other")] {
         client
@@ -359,7 +350,6 @@ async fn scenarios(client: &KubeClient, ns: &str) {
         .unwrap();
     assert_eq!(all_in_ns.len(), 3, "no selector lists every object in the namespace");
 
-    // Delete.
     let obj: MyType = client.get_as(&key).await.unwrap();
     client.delete(&obj).await.expect("delete");
     let gone = client.get_as::<MyType>(&key).await.unwrap_err();
