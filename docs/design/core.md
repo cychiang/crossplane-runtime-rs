@@ -191,8 +191,11 @@ Deviations of the scaffold from the synthesis brief:
   them or because the base had them real, and the unit that owns each must test or replace it:
   the kube client verb mapping (1.4), the derive
   expansion and `controller_gen_compat` (exercised by crd-diff only; 1.10 and 1.2).
-- The provider's HTTP client (`examples/provider-sample/src/provider/client.rs`) is `todo!()`;
-  it lands with the template in unit 2.3.
+- The provider's HTTP client (`examples/provider-sample/src/provider/client.rs`) was `todo!()`.
+  Filled at integration over hyper-util's legacy client (already in the tree through kube), with
+  Go's status handling, contract error texts, 10s timeout and `json.Encoder` trailing newline.
+  A transport error reads `Get "<url>": <cause chain>` like Go's `url.Error`; the cause text is
+  hyper's, not Go's `net` package's.
 - `main.rs` mirrors only the environment variables Go names explicitly, not kingpin's
   `DefaultEnvars`.
 - `hack/port-coverage.sh` gained two flags the brief did not ask for: `--complete` (fail while
