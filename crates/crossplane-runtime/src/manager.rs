@@ -7,18 +7,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossplane_core::client::Client;
-use crossplane_core::errors::Result;
+use crossplane_core::errors::{Error, Result};
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cache::Cache;
 use crate::event::{ApiRecorder, PendingEvent, Recorder};
-use crate::kube_client::KubeClient;
+use crate::kube_client::{self, KubeClient};
+use crate::ratelimiter::Throttle;
 
-/// How to reach the API server, and how fast. [`RestConfig::infer`] is the only constructor and
-/// [`Manager::new`] the only consumer, so every request in the process carries the client-side
-/// throttle and the Go-style User-Agent.
+/// How to reach the API server, and how fast. [`RestConfig::infer`] is the only public
+/// constructor and [`Manager::new`] the only consumer, so every request in the process carries
+/// the client-side throttle and the Go-style User-Agent.
+#[derive(Clone)]
 pub struct RestConfig {
     kube: kube::Config,
     qps: f32,
@@ -28,11 +30,33 @@ pub struct RestConfig {
 
 impl RestConfig {
     /// Go `ctrl.GetConfig`: in-cluster config, or the local kubeconfig. Starts at client-go's
-    /// defaults of 5 QPS and burst 10; `ratelimiter::limit_rest_config` raises them.
+    /// defaults of 5 QPS and burst 10 (`rest/config.go` `DefaultQPS`, `DefaultBurst`);
+    /// `ratelimiter::limit_rest_config` raises them.
     ///
-    /// The User-Agent has client-go's format, `<binary>/<version> (<os>/<arch>) kubernetes/<commit>`.
+    /// The User-Agent has client-go's format, `<command>/<version> (<os>/<arch>) kubernetes/<commit>`
+    /// (`rest/config.go:515-536`). `binary` stands in when the process has no `argv[0]`.
     pub async fn infer(binary: &str, version: &str) -> Result<Self> {
-        todo!("kube::Config::infer; user agent for {binary}/{version}")
+        let kube = kube::Config::infer().await.map_err(Error::foreign)?;
+        Ok(Self::from_config(kube, binary, version))
+    }
+
+    pub(crate) fn from_config(kube: kube::Config, binary: &str, version: &str) -> Self {
+        let argv0 = std::env::args_os().next();
+        let command = argv0
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).file_name())
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| binary.to_owned());
+        Self {
+            kube,
+            qps: 5.0,
+            burst: 10,
+            user_agent: user_agent(&command, version, std::env::consts::OS, std::env::consts::ARCH, ""),
+        }
+    }
+
+    pub(crate) fn user_agent(&self) -> &str {
+        &self.user_agent
     }
 
     pub(crate) fn throttled(mut self, qps: f32, burst: u32) -> Self {
@@ -41,12 +65,43 @@ impl RestConfig {
         self
     }
 
-    /// Builds the one `kube::Client`, with the throttle as a tower layer and the User-Agent as a
-    /// default header.
-    fn into_kube_client(self) -> Result<kube::Client> {
-        let _ = (self.kube, self.qps, self.burst, self.user_agent);
-        todo!()
+    /// Go `rest.AddUserAgent`: appends `/<suffix>`, as the leader elector's client does.
+    fn with_user_agent_suffix(mut self, suffix: &str) -> Self {
+        self.user_agent = format!("{}/{suffix}", self.user_agent);
+        self
     }
+
+    /// Builds a `kube::Client` with its own throttle, as each client-go client gets its own rate
+    /// limiter from `QPS` and `Burst`.
+    pub(crate) fn into_kube_client(self) -> Result<kube::Client> {
+        kube_client::connect(self.kube, &self.user_agent, Throttle::new(self.qps, self.burst))
+    }
+}
+
+/// client-go `buildUserAgent` with `adjustVersion`, `adjustCommit` and Go's names for the OS and
+/// architecture, so the string has the shape the Go baseline sends.
+fn user_agent(command: &str, version: &str, os: &str, arch: &str, commit: &str) -> String {
+    let or_unknown = |s: &str| {
+        if s.is_empty() {
+            "unknown".to_owned()
+        } else {
+            s.to_owned()
+        }
+    };
+    let version = or_unknown(version.split('-').next().unwrap_or_default());
+    let commit = or_unknown(&commit.chars().take(7).collect::<String>());
+    let os = match os {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match arch {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        "powerpc64" => "ppc64le",
+        other => other,
+    };
+    format!("{}/{version} ({os}/{arch}) kubernetes/{commit}", or_unknown(command))
 }
 
 /// Go `ctrl.Options` as the baseline sets them.
@@ -210,3 +265,7 @@ impl Manager {
 pub async fn setup_signal_handler() {
     todo!("tokio::signal::unix; spawn second-signal exit(1)")
 }
+
+#[cfg(test)]
+#[path = "manager_test.rs"]
+mod tests;

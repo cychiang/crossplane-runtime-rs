@@ -39,7 +39,7 @@ pub fn new_controller() -> Arc<dyn RateLimiter> {
 /// Go `NewGlobal`: a token bucket of `rps` per second with burst `rps * 10`, shared by every
 /// controller (`pkg/ratelimiter/default.go:32`).
 pub fn new_global(rps: u32) -> Arc<dyn RateLimiter> {
-    Arc::new(TokenBucket::new(rps, rps * 10))
+    Arc::new(TokenBucket::new(f64::from(rps), rps * 10))
 }
 
 /// Go `LimitRESTConfig`: QPS `rps * 5`, burst `rps * 10` (`pkg/ratelimiter/default.go:48`).
@@ -94,7 +94,7 @@ const INF_DURATION: Duration = Duration::from_nanos(i64::MAX as u64);
 /// client-go `BucketRateLimiter` over `golang.org/x/time/rate.Limiter`. `when` is
 /// `Limiter.Reserve().Delay()`: it always takes a token, letting the bucket go negative, and never
 /// gives it back (`util/workqueue/default_rate_limiters.go:68-70`, `rate/rate.go:207-209,337-381`).
-struct TokenBucket {
+pub(crate) struct TokenBucket {
     rps: f64,
     burst: u32,
     state: Mutex<Bucket>,
@@ -106,9 +106,9 @@ struct Bucket {
 }
 
 impl TokenBucket {
-    fn new(rps: u32, burst: u32) -> Self {
+    pub(crate) fn new(rps: f64, burst: u32) -> Self {
         Self {
-            rps: f64::from(rps),
+            rps,
             burst,
             state: Mutex::new(Bucket {
                 tokens: f64::from(burst),
@@ -128,10 +128,9 @@ impl TokenBucket {
         }
         Duration::from_nanos(nanos as u64)
     }
-}
 
-impl RateLimiter for TokenBucket {
-    fn when(&self, _: &Request) -> Duration {
+    /// Go `Limiter.Reserve().Delay()`: takes a token now and says how long to wait for it.
+    pub(crate) fn reserve(&self) -> Duration {
         if self.burst < 1 {
             return INF_DURATION;
         }
@@ -148,8 +147,91 @@ impl RateLimiter for TokenBucket {
         b.last = now;
         wait
     }
+}
+
+impl RateLimiter for TokenBucket {
+    fn when(&self, _: &Request) -> Duration {
+        self.reserve()
+    }
 
     fn forget(&self, _: &Request) {}
+}
+
+/// client-go's per-client throttle (`rest.Config.QPS` and `Burst`): a token bucket every request
+/// waits on before it is sent, except watches, which client-go does not throttle
+/// (`rest/request.go:758-765` against `:1054`).
+#[derive(Clone)]
+pub(crate) struct Throttle {
+    bucket: Arc<TokenBucket>,
+}
+
+impl Throttle {
+    pub(crate) fn new(qps: f32, burst: u32) -> Self {
+        Self {
+            bucket: Arc::new(TokenBucket::new(f64::from(qps), burst)),
+        }
+    }
+}
+
+impl<S> tower::Layer<S> for Throttle {
+    type Service = Throttled<S>;
+
+    fn layer(&self, inner: S) -> Throttled<S> {
+        Throttled {
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+            bucket: self.bucket.clone(),
+        }
+    }
+}
+
+/// kube's inner service is not `Clone`, so it sits behind a lock held only while a request is
+/// handed to it, never while the response is awaited.
+#[derive(Clone)]
+pub(crate) struct Throttled<S> {
+    inner: Arc<tokio::sync::Mutex<S>>,
+    bucket: Arc<TokenBucket>,
+}
+
+fn is_watch<B>(req: &http::Request<B>) -> bool {
+    req.uri()
+        .query()
+        .is_some_and(|q| q.split('&').any(|kv| kv == "watch=true" || kv == "watch=1"))
+}
+
+impl<S, B> tower::Service<http::Request<B>> for Throttled<S>
+where
+    S: tower::Service<http::Request<B>> + Send + 'static,
+    S::Future: Send,
+    B: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = BoxFuture<'static, std::result::Result<S::Response, S::Error>>;
+
+    fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> std::task::Poll<std::result::Result<(), S::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: http::Request<B>) -> Self::Future {
+        let wait = if is_watch(&req) {
+            Duration::ZERO
+        } else {
+            self.bucket.reserve()
+        };
+        let inner = self.inner.clone();
+        async move {
+            if wait > Duration::ZERO {
+                tokio::time::sleep(wait).await;
+            }
+            let response = {
+                let mut inner = inner.lock().await;
+                futures::future::poll_fn(|cx| inner.poll_ready(cx)).await?;
+                inner.call(req)
+            };
+            response.await
+        }
+        .boxed()
+    }
 }
 
 /// Go `ratelimiter.Reconciler`: when the global bucket says wait, the inner reconciler is not
