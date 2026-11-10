@@ -460,9 +460,32 @@ async fn unix_client_waits_for_the_sidecar_to_listen() {
 async fn send_gives_up_after_the_send_timeout() {
     let logger =
         GrpcChangeLogger::new(UnixChangeLogClient::new(socket_path())).send_timeout(Duration::from_millis(250));
+    let started = std::time::Instant::now();
     let got = logger.log(sample_entry()).await;
     let want = Err(Error::deadline_exceeded().wrap("cannot send change log entry"));
     test::assert_result("send_timeout", "Nothing listens on the socket.", &want, &got);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+/// Go's `defaultSendTimeout`, on a client that never answers.
+#[tokio::test(start_paused = true)]
+async fn send_times_out_after_ten_seconds_by_default() {
+    struct Hangs;
+    impl ChangeLogServiceClient for Hangs {
+        fn send_change_log(&self, _: SendChangeLogRequest) -> BoxFuture<'_, Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    let started = tokio::time::Instant::now();
+    let got = GrpcChangeLogger::new(Hangs).log(sample_entry()).await;
+    let want = Err(Error::deadline_exceeded().wrap("cannot send change log entry"));
+    test::assert_result("default_timeout", "The client never answers.", &want, &got);
+    assert_eq!(Duration::from_secs(10), started.elapsed());
 }
 
 /// Waiting for ready covers only an unreachable sidecar. An error the sidecar sends is final.
