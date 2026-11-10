@@ -205,4 +205,6 @@ difference and must give a reason:
 
 `layer` is `chainsaw`, `audit`, `events` or `calls`. `kind` is `missing` (only in A), `extra` (only in B), `changed`
 or `verb`. `key`, `a` and `b` are globs over the report's key and A and B columns, where `*` matches anything, and
-an omitted `a` or `b` matches anything. The report lists each allowance as used or `UNUSED`.
+an omitted `a` or `b` matches anything. `detail` limits a `changed` allowance to the changed paths the report lists
+under a difference. It is one glob or a list of globs, and every changed path must match one of them, so a
+difference that also changes anything else is not allowed. The report lists each allowance as used or `UNUSED`.
