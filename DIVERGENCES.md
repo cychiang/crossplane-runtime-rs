@@ -51,3 +51,11 @@ sink (a strategic merge patch of a repeated event, as client-go's), in
   which also reads a `--kubeconfig` flag registered on Go's `flag` set. The baseline parses its
   flags with kingpin, so whether that flag is ever parsed is not known. Running the baseline
   binary with `--kubeconfig` would settle it.
+- **Requeue delays run long.** Over the 1, 2, 4, 8 and 16s backoff that holds a deleted MR
+  inside the creation grace period, the Rust provider's `PendingExternalResource` event writes
+  came 7.8, 3.0, 4.2, 6.2 and 19.7ms later than the delay, the Go provider's 3.9, 1.2, 0.9, 0.6 and 0.8ms
+  (`parity-poll-interval` in runs rust-4 and go-h, from `audit-raw.jsonl`). The work queue
+  sleeps with `tokio::time::sleep_until` on the exact deadline and the backoff arithmetic matches
+  client-go, so the cause is not known. No compared layer shows it, but it moved Rust's last
+  ProviderConfig writes about 35ms later at the end of a test, into the cleanup race that the
+  2s `delayBeforeCleanup` in `parity/scenarios/chainsaw.yaml` now removes (rust-5 and rust-6).
