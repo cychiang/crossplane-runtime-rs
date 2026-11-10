@@ -46,6 +46,11 @@ spec:
               status: "False"
               reason: ReconcileError
               message: cannot determine creation result - remove the crossplane.io/external-create-pending annotation if it is safe to proceed
+    # The first reconciles race each other, and a 409 on the refusal's status
+    # write turns its "no requeue" into a requeue about 1s later. Wait it out,
+    # so the annotation is removed only after the MR is stuck for good.
+    - sleep:
+        duration: 5s
   - name: removing the annotation alone does nothing
     try:
     - patch:
