@@ -61,3 +61,8 @@ sink (a strategic merge patch of a repeated event, as client-go's), in
   event writes) was not timed, so the cause is not known. No compared layer shows it, but it moved Rust's last
   ProviderConfig writes about 35ms later at the end of a test, into the cleanup race that the
   2s `delayBeforeCleanup` in `parity/scenarios/chainsaw.yaml` now removes (rust-5 and rust-6).
+  One candidate was tested and not confirmed: the template built a new HTTP connection pool on
+  every connect, where Go reuses `http.DefaultTransport`. With one shared pool (template commit
+  "Share one HTTP connection pool across connects"), run rust-pool-1 measured 1, 2 and 4ms over
+  the 2, 4 and 8s backoffs, against rust-7's 3, 3 and 4ms and go-k's 1, 1 and 1ms. Three samples
+  per run cannot separate that from noise. Timing the reconcile itself would settle it.
