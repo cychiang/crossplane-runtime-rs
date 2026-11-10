@@ -12,7 +12,6 @@ use crossplane_core::resource::ObjectKey;
 use futures::FutureExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::config::{KubeConfigOptions, Kubeconfig};
 
 use crate::kube_client::KubeClient;
 use crate::manager::RestConfig;
@@ -22,11 +21,11 @@ pub(crate) async fn rest_config(test: &str) -> Option<RestConfig> {
         eprintln!("skipping {test}: set XPRS_TEST_KUBECONFIG to a kubeconfig");
         return None;
     };
-    let kubeconfig = Kubeconfig::read_from(&path).expect("readable kubeconfig");
-    let config = kube::Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
-        .await
-        .expect("usable kubeconfig");
-    Some(RestConfig::from_config(config, "xprs-test", "v0.0.0"))
+    Some(
+        RestConfig::from_kubeconfig(path, "xprs-test", "v0.0.0")
+            .await
+            .expect("usable kubeconfig"),
+    )
 }
 
 pub(crate) fn namespace(name: &str) -> Namespace {

@@ -31,6 +31,7 @@ mod kube_client;
 #[cfg(test)]
 mod live_test;
 
+pub mod cli;
 pub mod clock;
 pub mod controller;
 pub mod event;

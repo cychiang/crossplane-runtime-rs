@@ -180,3 +180,70 @@ async fn the_name_is_path_escaped_as_go_escapes_it() {
     let seen = stub.seen.lock().unwrap();
     assert_eq!(seen[0].1, "/things/a%20b%2Fc%3Fd%3Be%2Cf%25$&+:=@~");
 }
+
+#[tokio::test]
+async fn clients_from_new_share_one_connection() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crossplane_core::v2::CredentialsSource;
+    use crossplane_runtime::controller::Options;
+    use crossplane_runtime::feature::Features;
+    use crossplane_runtime::gate::Gate;
+    use crossplane_runtime::ratelimiter;
+    use crossplane_test::MockClient;
+
+    use crate::apis::v1alpha1::ProviderCredentials;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let service = service_fn(|_: Request<Incoming>| async { Ok::<_, Infallible>(respond(404, None)) });
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+
+    let mut options = Options {
+        max_concurrent_reconciles: 1,
+        poll_interval: Duration::from_secs(60),
+        global_rate_limiter: ratelimiter::new_global(10),
+        features: Features::default(),
+        gate: Arc::new(Gate::default()),
+        metric_options: None,
+        change_log_options: None,
+    };
+    let flags = crate::provider::Flags {
+        external_endpoint: format!("http://{addr}"),
+    };
+    crate::provider::configure(&mut options, &flags).unwrap();
+
+    for name in ["first", "second"] {
+        let client = Client::new(ClientConfig {
+            spec: ProviderConfigSpec {
+                credentials: ProviderCredentials {
+                    source: CredentialsSource::NONE,
+                    secret_ref: None,
+                },
+            },
+            credentials: Vec::new(),
+            kube: Arc::new(MockClient::default()),
+        })
+        .await
+        .unwrap();
+        assert_eq!(client.get(name).await.unwrap(), None, "the stub has no things");
+    }
+
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "two clients from Client::new reuse one pooled connection"
+    );
+}
