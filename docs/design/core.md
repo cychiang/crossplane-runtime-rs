@@ -189,8 +189,7 @@ Deviations of the scaffold from the synthesis brief:
 
 - Bodies that are real but have no test yet. They were kept because something run here executes
   them or because the base had them real, and the unit that owns each must test or replace it:
-  the kube client verb mapping (1.4), the reconcile timeout and grace wrapper and the phase
-  skeleton of `Run` beyond the two ported branches (1.6), `policy.rs` (1.6), the derive
+  the kube client verb mapping (1.4), the derive
   expansion and `controller_gen_compat` (exercised by crd-diff only; 1.10 and 1.2).
 - The provider's HTTP client (`examples/provider-sample/src/provider/client.rs`) is `todo!()`;
   it lands with the template in unit 2.3.
@@ -372,6 +371,52 @@ Unit 1.5 (`pkg/resource`):
   `ConnectionSecretFor` (cluster-scoped owner), `NotProviderConfigReferencer` (type switch), and
   the two nil-error rows.
 
+Unit 1.6 (managed reconciler):
+
+- Deadlines. The scaffold dropped the whole run at the outer deadline. Now each call is bounded
+  on its own, as a Go context bounds it: external calls (connect, observe, create, update,
+  delete) by `timeout`, every Kubernetes and collaborator call by `timeout + grace`. A call past
+  its deadline fails with `context deadline exceeded` and the reconcile carries on into the
+  branch that handles the error, so an external hang still gets its event and status write.
+  `Deadlines` and `bounded` in `reconciler/managed/mod.rs`.
+- Shape. `Reconciler::run` handles get, pause and the reconcile-request token; `Run` holds the
+  per-reconcile state and has one method per phase. A phase returns `ControlFlow`: continue, or
+  break with the branch's result. `report` is Go's branch tail (event, conditions, status
+  write), `failed` adds the conflict short-circuit, `finish` stamps the token and writes status.
+  B04 has no code: `PolicyResolver::validate` cannot return a conflict.
+- Status reset. Every full-object write replaces the in-memory object with the server's
+  response: the initializer, the finalizer, the create-pending annotation, the critical
+  annotations and late-init. The parity spec describes this for late-init only (S5). It is why
+  the first reconcile of an observe-only resource writes `Synced` without `Ready`: the finalizer
+  PUT returns the stored, empty status. Measured in the Go audit trace and traced to
+  controller-runtime's decoder, which zeroes the target before decoding. Pinned by
+  `adding_the_finalizer_drops_the_conditions_observe_set`.
+- Change logs. tonic and prost are plain dependencies, not behind a cargo feature as the
+  scaffold comment said. The three proto messages are hand-written prost structs
+  (`changelog/proto.rs`), so no build needs protoc; `request_encodes_as_protoc_does` pins them
+  to bytes protoc produced from the Go repository's `.proto`. `ChangeLogServiceClient` is the
+  seam Go's generated client interface gives. `UnixChangeLogClient` dials lazily and redials
+  every 100ms while the socket is unreachable, which stands in for `grpc.WaitForReady(true)`;
+  the logger's send timeout bounds it. An error the sidecar sends is returned at once.
+  `ChangeLogEntry.snapshot` is a JSON object, not any JSON value.
+- Go returns `AdditionalDetails` beside an error from Create, Update and Delete and logs them.
+  A Rust `Result` carries one or the other, so a failed operation's entry has no details.
+- `ApiLocalSecretPublisher::with_applicator` exists for the ported table, as Go's test builds
+  the struct directly.
+- `MrMetricRecorder::with_clock` is not in Go. An object with no creation or deletion timestamp
+  observes nothing, where Go would observe the seconds since year one.
+- `effective_poll_interval`: the minimum floors the annotation only, as in Go.
+- `TestRetryingCriticalAnnotationUpdater/UpdateConflictGetError`: Go's mock Get fills the
+  object and then fails, and the case expects the filled object. `Client::get` returns an object
+  or an error, so the ported case expects the object untouched. `crossplane-test` is unchanged.
+- `TestPrepareJSONMerge`: Go's fake has no TypeMeta and inlines ObjectMeta, so Go expects
+  `{"name":"resolved"}`. The Rust patch is in a real kind's wire shape, with `apiVersion`,
+  `kind` and `metadata.name`.
+- `TestAPISecretPublisher` (4 rows) is skipped: the legacy publisher.
+- Tests with no Go counterpart are in `reconciler_effects_test.rs` (effect order per branch,
+  the conflict table, deadlines, the annotation updater's retries), `metrics.rs` and the second
+  half of `changelogger_test.rs` (wire encoding, Unix socket transport against a tonic server).
+
 ## Verification
 
 Rerun these; each was run on the scaffold.
@@ -424,12 +469,12 @@ None of these is resolved by the scaffold.
    owns the timeout. What the driver guarantees is that a key is released on every exit path
    (normal return, recovered panic, unrecovered panic, the worker's future dropped
    mid-reconcile), through a drop guard as Go defers `Done` (`controller.go:432`).
-   `a_dropped_reconcile_releases_its_key` tests the dropped case. The rest of this question
-   stays with 1.6: at the outer deadline the reconciler drops the whole run and returns a deadline error. Go lets
-   each later Kubernetes call fail on the expired context and carries on through the remaining
-   branches. Is the difference observable (status writes, events), and if so which side changes?
-7. No ported case exercises Update overwriting the in-memory object (parity spec S5). Which Go
-   case pins it, and should `late_initialize` wait for that case before it is written?
+   `a_dropped_reconcile_releases_its_key` tests the dropped case. Reconciler side answered
+   (unit 1.6): the reconciler no longer drops the run. Each call fails on its own deadline and
+   the remaining branches run, as in Go (see "Implementation reconciliation", unit 1.6).
+7. Answered (unit 1.6). No Go case pins it; the parity trace does. See "Status reset" under
+   unit 1.6. `adding_the_finalizer_drops_the_conditions_observe_set` and the
+   `new_mock_response_fn` cases cover it.
 8. Is the JSON bridge in `get_as` and `assert_object_eq` cheap enough at poll rates, or does the
    cache need a typed fast path?
 9. `controller_gen_compat` strips `nullable` globally. Is there a field where controller-gen
