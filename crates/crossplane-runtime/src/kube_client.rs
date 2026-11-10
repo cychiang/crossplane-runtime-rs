@@ -9,7 +9,7 @@ use crossplane_core::errors::{Error, Result, StatusReason};
 use crossplane_core::resource::{Object, ObjectKey, ObjectType};
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use kube::api::{Api, DeleteParams, DynamicObject, ListParams, Patch as KubePatch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, DynamicObject, Patch as KubePatch, PatchParams, PostParams};
 
 use crate::cache::Cache;
 use crate::ratelimiter::Throttle;
@@ -22,6 +22,7 @@ pub(crate) struct KubeClient {
 /// Go's manager client reads through the informer cache; `client.New` reads the API server.
 enum Reads {
     Cached(Cache),
+    #[cfg(test)]
     Direct,
 }
 
@@ -43,7 +44,9 @@ impl KubeClient {
         }
     }
 
-    /// Reads go to the API server, as Go's `client.New` and `mgr.GetAPIReader()` do.
+    /// Reads go to the API server, as Go's `client.New` and `mgr.GetAPIReader()` do. Only tests
+    /// read this way: no in-scope Go code path uses an uncached reader.
+    #[cfg(test)]
     pub(crate) fn uncached(kube: kube::Client) -> Self {
         Self {
             kube,
@@ -63,6 +66,7 @@ impl KubeClient {
         self.api_in(&obj.object_type(), obj.meta().namespace.as_deref())
     }
 
+    #[cfg(test)]
     async fn get_direct(&self, object_type: &ObjectType, key: &ObjectKey) -> Result<Box<dyn Object>> {
         let found = self
             .api_in(object_type, key.namespace.as_deref())
@@ -72,6 +76,7 @@ impl KubeClient {
         object_type.decode(serde_json::to_value(found).map_err(Error::foreign)?)
     }
 
+    #[cfg(test)]
     async fn list_direct(&self, object_type: &ObjectType, options: &ListOptions) -> Result<Vec<Box<dyn Object>>> {
         let selector = options
             .labels
@@ -79,9 +84,9 @@ impl KubeClient {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(",");
-        let params = ListParams {
+        let params = kube::api::ListParams {
             label_selector: (!selector.is_empty()).then_some(selector),
-            ..ListParams::default()
+            ..kube::api::ListParams::default()
         };
         let list = self
             .api_in(object_type, options.namespace.as_deref())
@@ -155,6 +160,7 @@ impl Client for KubeClient {
     fn get<'a>(&'a self, object_type: &'a ObjectType, key: &'a ObjectKey) -> BoxFuture<'a, Result<Box<dyn Object>>> {
         match &self.reads {
             Reads::Cached(cache) => cache.get(object_type, key).boxed(),
+            #[cfg(test)]
             Reads::Direct => self.get_direct(object_type, key).boxed(),
         }
     }
@@ -166,6 +172,7 @@ impl Client for KubeClient {
     ) -> BoxFuture<'a, Result<Vec<Box<dyn Object>>>> {
         match &self.reads {
             Reads::Cached(cache) => cache.list(object_type, options).boxed(),
+            #[cfg(test)]
             Reads::Direct => self.list_direct(object_type, options).boxed(),
         }
     }

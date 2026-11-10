@@ -168,8 +168,8 @@ Rejected: none of the six. Dropped along the way as unused: the `governor`, `thi
 - We accept owning a queue and informer in exchange for controller-runtime's requeue semantics,
   which `kube::runtime::Controller` does not have.
 - `clippy::type_complexity` is allowed workspace wide (the `*Fn` adapters each hold one boxed
-  closure), and `crossplane-runtime` has `#![allow(dead_code)]` while bodies are `todo!()`. The
-  second must go when unit 1.9 closes.
+  closure), and `crossplane-runtime` had `#![allow(dead_code)]` while bodies were `todo!()`.
+  Removed at integration.
 
 ## Alternatives considered
 
@@ -197,6 +197,11 @@ Deviations of the scaffold from the synthesis brief:
   has since tested the derives, see below.
 - The provider's HTTP client (`examples/provider-sample/src/provider/client.rs`) is `todo!()`;
   it lands with the template in unit 2.3.
+- The provider's HTTP client (`examples/provider-sample/src/provider/client.rs`) was `todo!()`.
+  Filled at integration over hyper-util's legacy client (already in the tree through kube), with
+  Go's status handling, contract error texts, 10s timeout and `json.Encoder` trailing newline.
+  A transport error reads `Get "<url>": <cause chain>` like Go's `url.Error`; the cause text is
+  hyper's, not Go's `net` package's.
 - `main.rs` mirrors only the environment variables Go names explicitly, not kingpin's
   `DefaultEnvars`.
 - `hack/port-coverage.sh` gained two flags the brief did not ask for: `--complete` (fail while
@@ -318,12 +323,17 @@ Units 1.7 and 1.8 (ProviderConfig reconciler, safe-start gate):
   `o.gate.clone()` and `controller::Options` is unchanged.
 - `TransformStripCRDSchema` is `customresourcesgate::transform_strip_crd_schema(&mut dyn Object)`.
   It mutates in place and ignores any kind but a CRD, where Go returns the object. Nothing calls
-  it yet: the informer cache (1.9) has no transform hook, and the baseline does not install it.
+  it, by decision at integration: Go's `Setup` installs no transform (`setup.go` only builds the
+  controller) and the baseline's `cache.Options` sets only `SyncPeriod`
+  (`cmd/provider/main.go:95-97`), so the baseline caches whole CRDs. Wiring a transform hook
+  into the cache would change only memory use, never a request, and would make the Rust cache
+  differ from the baseline's. A provider cannot install it either, since the cache has no public
+  options; add a per-kind transform hook when a provider needs one.
 - Gate callbacks run on `spawn_blocking` when a tokio runtime is current and on a new thread
   otherwise, because a callback typically registers controllers and the caller of `register` or
   `set` may be either.
-- The ProviderConfig reconciler ends the whole run at `TIMEOUT` with a deadline error, the same
-  open point as the managed reconciler (see its note). The legacy usage kind probe
+- The ProviderConfig reconciler ended the whole run at `TIMEOUT`. Fixed at integration: each
+  call is bounded by the one deadline (see "Integration"). The legacy usage kind probe
   (`legacyPCU`) is not ported: the label selector always carries the kind label.
 - `Setup` with a nil gate (G3) has no Rust counterpart: `Options::gate` is a non-optional `Arc`.
 - Extra tests with no Go case, in `providerconfig_test.rs`: verb order and bodies (get, list,
@@ -398,10 +408,10 @@ Unit 1.9, rest (RestConfig, cache, manager, builder, event recorder, statemetric
   resourceVersion, rather than `kube-lease-manager`, which judges expiry from the server's
   `renewTime` against the local clock and renews without a resourceVersion
   (`leader_election.rs` module doc).
-- The builder's live test uses a test-local copy of `DesiredStateChanged` and a test-local
-  ProviderConfigUsage-shaped handler, because `resource::predicates` and
-  `EnqueueRequestForProviderConfig` belong to unit 1.5 and are `todo!()` on this branch. Rerun it
-  with the real ones after the merge.
+- The builder's live test used test-local copies of `DesiredStateChanged` and of a
+  usage-shaped handler while unit 1.5 was unfinished. At integration it runs the real
+  `resource::desired_state_changed` and `EnqueueRequestForProviderConfig`, watching the
+  baseline's `example.com` ProviderConfigUsage.
 - `#![allow(dead_code)]` stays in `crossplane-runtime/src/lib.rs`: the remaining `todo!()`s are
   other units' (1.5, 1.6, 1.7, 1.8).
 - Units 1.10 and 1.11 (derive, reference):
@@ -476,6 +486,43 @@ Unit 1.6 (managed reconciler):
 - Tests with no Go counterpart are in `reconciler_effects_test.rs` (effect order per branch,
   the conflict table, deadlines, the annotation updater's retries), `metrics.rs` and the second
   half of `changelogger_test.rs` (wire encoding, Unix socket transport against a tonic server).
+
+Integration (the merged units run together):
+
+- `#![allow(dead_code)]` is gone from `crossplane-runtime/src/lib.rs`. What it hid, and why each
+  went where it did: `Elector::identity` was dead (the identity is passed in and only read
+  inside the elector) and is deleted. Test-only, now `#[cfg(test)]`: `KubeClient::uncached` with
+  `Reads::Direct`, `get_direct` and `list_direct` (no in-scope Go path uses an uncached reader;
+  the baseline never calls `GetAPIReader` or `client.New`), `RestConfig::user_agent` (the
+  header is sent from the field; tests read it back), `Manager::metrics_address` (tests bind
+  port 0), and `ReconcilerBuilder::connection_publisher` (Go's `withLocalConnectionPublishers`
+  is unexported and only its tests call it). None was a seam left unwired.
+- The ProviderConfig reconciler bounds each call by `TIMEOUT` from the start, Go's single
+  `context.WithTimeout`, instead of dropping the run. A Get past it returns `cannot get
+  ProviderConfig: context deadline exceeded`; a List past it takes the List branch (warning
+  event, wait 30s). `bounded` moved from the managed reconciler to the private
+  `reconciler/deadline.rs`; `Deadlines`, the managed reconciler's two-context pair, stays there.
+- `e2e_test.rs` runs the units together against a live cluster: a Manager, a managed controller
+  wired as `wiring.rs` wires one (rate-limited reconciler, `desired_state_changed`, the API
+  recorder, management policies on as the baseline's flag defaults), a per-process `xprs-e2e-<pid>.example.com` CRD it installs and removes, and an
+  in-memory external system. It asserts through an uncached client: finalizer, external-name
+  and create annotations, `Synced`/`Ready` with Go's reasons, core/v1 Events with Go's reasons,
+  messages and source component, a spec change reaching external update, the pause annotation
+  stopping observes with `ReconcilePaused`, unpausing applying the change made while paused, and
+  deletion calling external delete and removing the finalizer. What the first run showed:
+  - It lives inside the crate, not in `examples/provider-sample/tests`, because `RestConfig` has
+    only `infer`, which reads `KUBECONFIG` from the environment, and `unsafe_code` is forbidden,
+    so a test cannot point it at a chosen kubeconfig. A provider that wants Go's `--kubeconfig`
+    flag cannot either. Public API left unchanged; a `RestConfig::from_kubeconfig` would close
+    it.
+  - A delete within `creationGracePeriod` (30s) of a successful create waits it out: Observe
+    reports not-exists, so the Pending branch (`R:1218`, before the deletion branch at `R:1231`)
+    records `PendingExternalResource` and requeues until the grace period ends. Go does the same.
+    The test sets a 3s grace period through `creation_grace_period`.
+  - With a 1s poll, the `desired_state_changed` filter is not observable: polls pick up a spec
+    change either way. The builder live test is what pins the filter.
+  - Repeated identical events (the second `UpdatedExternalResource`) show as one Event with a
+    higher count, the correlator's patch, as in the Go traces.
 
 ## Verification
 

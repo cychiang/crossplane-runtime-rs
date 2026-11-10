@@ -83,9 +83,11 @@ fn is_established(crd: &CustomResourceDefinition) -> bool {
         .is_some_and(|c| c.status == "True")
 }
 
-/// Go `TransformStripCRDSchema`, the informer cache's transform for CRDs: drops what the gate does
-/// not read (version schemas, managed fields, the last-applied annotation) before an object is
-/// stored. Any other kind is left alone.
+/// Go `TransformStripCRDSchema`: drops what the gate does not read (version schemas, managed
+/// fields, the last-applied annotation) from a CRD. Any other kind is left alone. Go offers it
+/// for a provider to install through `cache.Options`; the baseline does not
+/// (`cmd/provider/main.go:95-97`), so nothing here calls it and cached CRDs keep their schemas,
+/// as the baseline's do.
 pub fn transform_strip_crd_schema(obj: &mut dyn Object) {
     let Some(crd) = obj.downcast_mut::<CustomResourceDefinition>() else {
         return;

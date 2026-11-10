@@ -1,6 +1,7 @@
 //! Reconcilers and the outcome type the driver consumes.
 
 pub mod customresourcesgate;
+mod deadline;
 pub mod managed;
 pub mod providerconfig;
 

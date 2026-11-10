@@ -383,22 +383,48 @@ fn my_type(ns: &str, name: &str) -> MyType {
     }
 }
 
-/// A copy of Go `resource.DesiredStateChanged` (`pkg/resource/predicates.go:55-69`) for this
-/// test, because `resource::predicates` belongs to unit 1.5 and is not filled in on this branch.
-struct DesiredStateChangedForTest;
+/// The baseline's `example.com` ProviderConfigUsage, whose CRD is installed with the baseline, so
+/// the builder test can watch usages with the real `EnqueueRequestForProviderConfig`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Usage {
+    metadata: ObjectMeta,
+    #[serde(flatten)]
+    usage: crossplane_core::v2::TypedProviderConfigUsage,
+}
 
-impl crate::controller::Predicate for DesiredStateChangedForTest {
-    fn update(&self, old: &dyn crossplane_core::resource::Object, new: &dyn crossplane_core::resource::Object) -> bool {
-        let annotations = |o: &dyn crossplane_core::resource::Object| {
-            let mut a = o.meta().annotations.clone().unwrap_or_default();
-            a.remove(crossplane_core::meta::ANNOTATION_KEY_EXTERNAL_CREATE_FAILED);
-            a.remove(crossplane_core::meta::ANNOTATION_KEY_EXTERNAL_CREATE_PENDING);
-            a
-        };
-        let labels = |o: &dyn crossplane_core::resource::Object| o.meta().labels.clone().unwrap_or_default();
-        annotations(old) != annotations(new)
-            || labels(old) != labels(new)
-            || old.meta().generation != new.meta().generation
+impl kube::Resource for Usage {
+    type DynamicType = ();
+    type Scope = kube::core::NamespaceResourceScope;
+
+    fn kind(_: &()) -> std::borrow::Cow<'_, str> {
+        "ProviderConfigUsage".into()
+    }
+    fn group(_: &()) -> std::borrow::Cow<'_, str> {
+        "example.com".into()
+    }
+    fn version(_: &()) -> std::borrow::Cow<'_, str> {
+        "v1alpha1".into()
+    }
+    fn plural(_: &()) -> std::borrow::Cow<'_, str> {
+        "providerconfigusages".into()
+    }
+    fn meta(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+    fn meta_mut(&mut self) -> &mut ObjectMeta {
+        &mut self.metadata
+    }
+}
+
+impl crossplane_core::resource::ProviderConfigUsage for Usage {
+    fn from_usage(metadata: ObjectMeta, usage: crossplane_core::v2::TypedProviderConfigUsage) -> Self {
+        Self { metadata, usage }
+    }
+    fn usage(&self) -> &crossplane_core::v2::TypedProviderConfigUsage {
+        &self.usage
+    }
+    fn usage_mut(&mut self) -> &mut crossplane_core::v2::TypedProviderConfigUsage {
+        &mut self.usage
     }
 }
 
@@ -423,24 +449,6 @@ impl crate::reconciler::Reconcile for Counting {
             *self.0.lock().unwrap().entry(req.name.clone()).or_default() += 1;
         }
         async { Ok(crate::reconciler::Outcome::Done) }.boxed()
-    }
-}
-
-/// Maps every ConfigMap event to a reconcile of the MyType named in its `target` label, the shape
-/// of the ProviderConfig controller's `Watches(ProviderConfigUsage, EnqueueRequestForProviderConfig)`.
-struct ToTarget;
-
-impl crate::controller::EventHandler<ConfigMap> for ToTarget {
-    fn requests(&self, event: &crate::controller::WatchEvent<'_, ConfigMap>) -> Vec<crate::reconciler::Request> {
-        let cm = match event {
-            crate::controller::WatchEvent::Create(c) | crate::controller::WatchEvent::Delete(c) => *c,
-            crate::controller::WatchEvent::Update { new, .. } => *new,
-        };
-        let target = cm.metadata.labels.as_ref().and_then(|l| l.get("target"));
-        target
-            .map(|t| ObjectKey::namespaced(cm.metadata.namespace.clone().unwrap_or_default(), t.clone()))
-            .into_iter()
-            .collect()
     }
 }
 
@@ -496,9 +504,9 @@ async fn desired_state_changed_filters_status_writes_and_resyncs() {
     controller::new_managed_by(&mgr)
         .named("filtered")
         .with_options(ControllerOptions::default())
-        .with_event_filter(DesiredStateChangedForTest)
+        .with_event_filter(crate::resource::desired_state_changed())
         .for_kind::<MyType>()
-        .watches::<ConfigMap>(ToTarget)
+        .watches::<Usage>(crate::resource::EnqueueRequestForProviderConfig::new("ProviderConfig"))
         .complete(filtered.clone())
         .unwrap();
     let stop = tokio_util::sync::CancellationToken::new();
@@ -602,17 +610,34 @@ async fn desired_state_changed_filters_status_writes_and_resyncs() {
             "the create-pending annotation is ignored"
         );
 
-        let mut trigger = config_map(&ns, "trigger");
-        trigger.metadata.labels = Some([("target".to_owned(), "a".to_owned())].into());
-        client.create(&mut trigger).await.unwrap();
-        eventually("a watched ConfigMap mapped to its MyType", || async {
+        let mut usage = Usage {
+            metadata: ObjectMeta {
+                name: Some("trigger".into()),
+                namespace: Some(ns.clone()),
+                ..Default::default()
+            },
+            usage: crossplane_core::v2::TypedProviderConfigUsage {
+                provider_config_ref: crossplane_core::v2::ProviderConfigReference {
+                    kind: "ProviderConfig".into(),
+                    name: "a".into(),
+                },
+                resource_ref: crossplane_core::v2::TypedReference {
+                    api_version: "sample.example.com/v1alpha1".into(),
+                    kind: "MyType".into(),
+                    name: "a".into(),
+                    ..Default::default()
+                },
+            },
+        };
+        client.create(&mut usage).await.unwrap();
+        eventually("a watched usage mapped to the config it references", || async {
             (filtered.of("a") == 4).then_some(())
         })
         .await;
         assert_eq!(
             filtered.of("trigger"),
             0,
-            "the handler's mapping, not the ConfigMap's own key"
+            "the handler's mapping, not the usage's own key"
         );
         eprintln!(
             "filtered {:?}, control {:?}",

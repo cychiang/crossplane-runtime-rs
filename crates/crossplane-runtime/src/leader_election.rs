@@ -145,10 +145,6 @@ impl Elector {
         })
     }
 
-    pub(crate) fn identity(&self) -> &str {
-        &self.identity
-    }
-
     /// client-go `acquire`: try every retry period, with jitter, until the lease is ours. False
     /// when cancelled first.
     pub(crate) async fn acquire(&mut self, cancel: &CancellationToken) -> bool {

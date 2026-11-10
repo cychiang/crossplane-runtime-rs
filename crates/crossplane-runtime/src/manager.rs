@@ -63,6 +63,7 @@ impl RestConfig {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn user_agent(&self) -> &str {
         &self.user_agent
     }
@@ -253,7 +254,9 @@ impl Manager {
         self.inner.metrics.register(collector).map_err(Error::foreign)
     }
 
-    /// Where the metrics endpoint listens, once `start` has bound it.
+    /// Where the metrics endpoint listens, once `start` has bound it. Tests bind port 0 and read
+    /// the port back here.
+    #[cfg(test)]
     pub(crate) fn metrics_address(&self) -> Option<SocketAddr> {
         self.inner.metrics_address.get().copied()
     }

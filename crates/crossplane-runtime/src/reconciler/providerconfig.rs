@@ -16,8 +16,10 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use k8s_openapi::jiff::Timestamp;
+use tokio::time::Instant;
 
 use crate::event::{Event, NopRecorder, Reason, Recorder};
+use crate::reconciler::deadline::bounded;
 use crate::reconciler::{Outcome, Reconcile, Request};
 
 pub const FINALIZER_NAME: &str = "in-use.crossplane.io";
@@ -94,24 +96,16 @@ impl<PC: ProviderConfig, U: ProviderConfigUsage> ReconcilerBuilder<PC, U> {
 
 impl<PC: ProviderConfig, U: ProviderConfigUsage> Reconcile for Reconciler<PC, U> {
     /// PC1-PC8 (parity spec 4.1). Unconditional PUT and status PUT on every pass, as Go does; no
-    /// conflict handling.
-    ///
-    /// OPEN (docs/design/core.md): at `TIMEOUT` this drops the whole run with a deadline error.
-    /// Go lets each remaining Kubernetes call fail on the expired context and carries on through
-    /// the branch that handles that failure, as the managed reconciler's note says.
+    /// conflict handling. Every call ends at `TIMEOUT` after the start, Go's one context; a call
+    /// past it fails and the run carries on through the branch that handles that failure.
     fn reconcile<'a>(&'a self, req: &'a Request) -> BoxFuture<'a, Result<Outcome>> {
-        async move {
-            tokio::time::timeout(TIMEOUT, self.run(req))
-                .await
-                .unwrap_or_else(|_| Err(Error::deadline_exceeded()))
-        }
-        .boxed()
+        self.run(req, Instant::now() + TIMEOUT).boxed()
     }
 }
 
 impl<PC: ProviderConfig, U: ProviderConfigUsage> Reconciler<PC, U> {
-    async fn run(&self, req: &Request) -> Result<Outcome> {
-        let mut pc = match self.client.get_as::<PC>(req).await {
+    async fn run(&self, req: &Request, deadline: Instant) -> Result<Outcome> {
+        let mut pc = match bounded(deadline, self.client.get_as::<PC>(req)).await {
             Ok(pc) => pc,
             Err(e) if e.is_not_found() => return Ok(Outcome::Done),
             Err(e) => return Err(e.wrap(ERR_GET_PC)),
@@ -126,7 +120,7 @@ impl<PC: ProviderConfig, U: ProviderConfigUsage> Reconciler<PC, U> {
             .insert(LABEL_KEY_PROVIDER_KIND.to_owned(), PC::kind(&()).into_owned());
         options.namespace = Some(meta::namespace(&pc).to_owned()).filter(|ns| !ns.is_empty());
 
-        let usages = match self.client.list_as::<U>(&options).await {
+        let usages = match bounded(deadline, self.client.list_as::<U>(&options)).await {
             Ok(usages) => usages,
             Err(e) => {
                 self.warn(&pc, e.wrap(ERR_LIST_PCUS));
@@ -144,7 +138,7 @@ impl<PC: ProviderConfig, U: ProviderConfigUsage> Reconciler<PC, U> {
             if controlled {
                 continue;
             }
-            if let Err(e) = ignore_not_found(self.client.delete(usage).await) {
+            if let Err(e) = ignore_not_found(bounded(deadline, self.client.delete(usage)).await) {
                 self.warn(&pc, e.wrap(ERR_DELETE_PCU));
                 return Ok(Outcome::RequeueAfter(SHORT_WAIT));
             }
@@ -156,34 +150,31 @@ impl<PC: ProviderConfig, U: ProviderConfigUsage> Reconciler<PC, U> {
                 self.warn(&pc, Error::new(BLOCKING_MESSAGE));
                 pc.set_users(users);
                 pc.set_conditions([terminating().with_message(BLOCKING_MESSAGE)]);
-                return self
-                    .client
-                    .update_status(&mut pc)
+                return bounded(deadline, self.client.update_status(&mut pc))
                     .await
                     .wrap_err(ERR_UPDATE_STATUS)
                     .map(|()| Outcome::Done);
             }
 
             meta::remove_finalizer(&mut pc, FINALIZER_NAME);
-            return Ok(self.update_or_wait(&mut pc).await.unwrap_or(Outcome::Done));
+            return Ok(self.update_or_wait(&mut pc, deadline).await.unwrap_or(Outcome::Done));
         }
 
         meta::add_finalizer(&mut pc, FINALIZER_NAME);
-        if let Some(wait) = self.update_or_wait(&mut pc).await {
+        if let Some(wait) = self.update_or_wait(&mut pc, deadline).await {
             return Ok(wait);
         }
 
         pc.set_users(users);
-        self.client
-            .update_status(&mut pc)
+        bounded(deadline, self.client.update_status(&mut pc))
             .await
             .wrap_err(ERR_UPDATE_STATUS)
             .map(|()| Outcome::Done)
     }
 
     /// The PUT of the ProviderConfig. A failure is not an error: Go logs it and requeues.
-    async fn update_or_wait(&self, pc: &mut PC) -> Option<Outcome> {
-        match self.client.update(pc).await {
+    async fn update_or_wait(&self, pc: &mut PC, deadline: Instant) -> Option<Outcome> {
+        match bounded(deadline, self.client.update(pc)).await {
             Ok(()) => None,
             Err(e) => {
                 tracing::debug!(error = %e.wrap(ERR_UPDATE), "cannot update ProviderConfig");

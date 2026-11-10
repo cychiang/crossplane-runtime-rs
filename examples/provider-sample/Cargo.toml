@@ -22,6 +22,11 @@ tokio.workspace = true
 tracing.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio"] }
+http-body-util.workspace = true
 
 [dev-dependencies]
 crossplane-test.workspace = true
+hyper = { workspace = true, features = ["server"] }
+tokio = { workspace = true, features = ["net"] }
