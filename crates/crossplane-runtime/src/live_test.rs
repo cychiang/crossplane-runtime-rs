@@ -859,3 +859,164 @@ async fn the_metrics_endpoint_serves_managed_resource_state() {
     stop.cancel();
     running.await.unwrap().expect("the manager stops cleanly");
 }
+
+/// Reports its name when started, then runs until shutdown.
+struct Started {
+    name: &'static str,
+    tx: tokio::sync::mpsc::UnboundedSender<(&'static str, Instant)>,
+    gated: bool,
+}
+
+impl crate::manager::Runnable for Started {
+    fn start(
+        self: Box<Self>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, crossplane_core::errors::Result<()>> {
+        let _ = self.tx.send((self.name, Instant::now()));
+        Box::pin(async move {
+            shutdown.cancelled().await;
+            Ok(())
+        })
+    }
+
+    fn needs_leader_election(&self) -> bool {
+        self.gated
+    }
+}
+
+/// The manager's leader election end to end: a gated runnable waits while another identity holds
+/// a valid Lease, starts once the manager takes it over, the manager records Go's "became leader"
+/// event on the Lease, and an outside write of the holder makes `start` return "leader election
+/// lost".
+#[tokio::test]
+async fn the_manager_gates_runnables_on_the_lease_and_fails_when_it_is_lost() {
+    use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+    use k8s_openapi::api::core::v1::Event as CoreEvent;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
+
+    use crate::manager::{LeaderElection, Manager, ManagerOptions};
+
+    let Some(config) = rest_config("the_manager_gates_runnables_on_the_lease_and_fails_when_it_is_lost").await else {
+        return;
+    };
+    let kube = config.clone().into_kube_client().unwrap();
+    let direct = &KubeClient::uncached(kube.clone());
+    in_namespace(direct, "leader", |ns| async move {
+        let leases: kube::Api<Lease> = kube::Api::namespaced(kube.clone(), &ns);
+        let id = "xprs-test-manager";
+        let other = Lease {
+            metadata: ObjectMeta {
+                name: Some(id.into()),
+                ..Default::default()
+            },
+            spec: Some(LeaseSpec {
+                holder_identity: Some("other".into()),
+                lease_duration_seconds: Some(4),
+                acquire_time: Some(MicroTime(k8s_openapi::jiff::Timestamp::now())),
+                renew_time: Some(MicroTime(k8s_openapi::jiff::Timestamp::now())),
+                lease_transitions: Some(0),
+                ..Default::default()
+            }),
+        };
+        leases.create(&Default::default(), &other).await.unwrap();
+
+        let renew_deadline = Duration::from_secs(3);
+        let mgr = Manager::new(
+            config,
+            ManagerOptions {
+                metrics_bind_address: "0".into(),
+                leader_election: Some(LeaderElection {
+                    namespace: Some(ns.clone()),
+                    retry_period: Duration::from_secs(1),
+                    ..LeaderElection::new(id)
+                        .lease_duration(Duration::from_secs(4))
+                        .renew_deadline(renew_deadline)
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (tx, mut started) = tokio::sync::mpsc::unbounded_channel();
+        mgr.add(Started {
+            name: "gated",
+            tx: tx.clone(),
+            gated: true,
+        })
+        .unwrap();
+        mgr.add(Started {
+            name: "ungated",
+            tx,
+            gated: false,
+        })
+        .unwrap();
+        let begun = Instant::now();
+        let running = tokio::spawn({
+            let mgr = mgr.clone();
+            async move { mgr.start(std::future::pending()).await }
+        });
+
+        let (first, _) = started.recv().await.unwrap();
+        assert_eq!(first, "ungated", "a runnable that needs no lease starts at once");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            started.try_recv().is_err(),
+            "the gated runnable waits while `other` holds the lease"
+        );
+        let (gated, at) = tokio::time::timeout(Duration::from_secs(10), started.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(gated, "gated");
+        let held = leases.get(id).await.unwrap().spec.unwrap();
+        let holder = held.holder_identity.clone().unwrap();
+        let host = hostname::get().unwrap().to_string_lossy().into_owned();
+        let uuid = holder.strip_prefix(&format!("{host}_")).expect("hostname_uuid");
+        assert_eq!(uuid.len(), 36, "{holder}");
+        assert_eq!(held.lease_transitions, Some(1));
+        eprintln!(
+            "leader: gated runnable started {:?} after start; holder {holder}",
+            at - begun
+        );
+
+        let events: kube::Api<CoreEvent> = kube::Api::namespaced(kube.clone(), &ns);
+        let became = eventually("the became-leader event", || async {
+            let list = events.list(&Default::default()).await.ok()?;
+            list.items
+                .into_iter()
+                .find(|e| e.reason.as_deref() == Some("LeaderElection"))
+        })
+        .await;
+        assert_eq!(
+            became.message.as_deref(),
+            Some(format!("{holder} became leader").as_str())
+        );
+        assert_eq!(became.involved_object.kind.as_deref(), Some("Lease"));
+        assert_eq!(became.involved_object.name.as_deref(), Some(id));
+        assert_eq!(
+            became.source.as_ref().and_then(|s| s.component.as_deref()),
+            Some(holder.as_str())
+        );
+        assert_eq!(became.type_.as_deref(), Some("Normal"));
+
+        loop {
+            let mut stolen = leases.get(id).await.unwrap();
+            stolen.spec.as_mut().unwrap().holder_identity = Some("intruder".into());
+            match leases.replace(id, &Default::default(), &stolen).await {
+                Ok(_) => break,
+                Err(kube::Error::Api(s)) if s.code == 409 => continue,
+                Err(e) => panic!("steal: {e}"),
+            }
+        }
+        let stolen_at = Instant::now();
+        let result = tokio::time::timeout(renew_deadline * 3, running)
+            .await
+            .expect("start returned")
+            .unwrap();
+        eprintln!(
+            "leader: start returned {:?} after the holder was overwritten",
+            stolen_at.elapsed()
+        );
+        assert_eq!(result.unwrap_err().to_string(), "leader election lost");
+    })
+    .await;
+}

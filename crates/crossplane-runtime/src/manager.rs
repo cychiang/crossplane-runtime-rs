@@ -403,7 +403,10 @@ async fn start_runnable(
     if runnable.needs_leader_election() {
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            _ = leading.wait_for(|l| *l) => {}
+            led = leading.wait_for(|l| *l) => if led.is_err() {
+                // The elector ended without the lease.
+                return Ok(());
+            },
         }
     }
     runnable.start(stop).await

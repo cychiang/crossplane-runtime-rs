@@ -222,6 +222,17 @@ async fn leader_gated_runnables_wait_for_the_lease() {
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (lead, leading) = watch::channel(false);
+    drop(lead);
+    start_runnable(Box::new(Gated(tx)), leading, CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        rx.try_recv().is_err(),
+        "an elector that ends without the lease opens nothing"
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (lead, leading) = watch::channel(false);
     let gated = tokio::spawn(start_runnable(Box::new(Gated(tx)), leading, CancellationToken::new()));
     lead.send_replace(true);
     gated.await.unwrap().unwrap();
@@ -249,4 +260,16 @@ fn metrics_are_served_on_slash_metrics_only() {
     assert_eq!(other.status(), 404);
     let post = metrics_response(&registry, &http::Method::POST, "/metrics");
     assert_eq!(post.status(), 404);
+}
+
+#[test]
+fn the_leader_election_client_appends_to_the_user_agent() {
+    let config = kube::Config::new("http://127.0.0.1:9".parse().unwrap());
+    let rest = RestConfig::from_config(config, "xprs-test", "v1.2.3");
+    let base = rest.user_agent().to_owned();
+    assert_eq!(
+        rest.with_user_agent_suffix("leader-election").user_agent(),
+        format!("{base}/leader-election"),
+        "client-go rest.AddUserAgent"
+    );
 }
