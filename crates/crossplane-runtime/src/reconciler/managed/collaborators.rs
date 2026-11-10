@@ -3,16 +3,26 @@
 //! synchronous closures for tables, and a default that talks to the API server through the
 //! client seam.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use crossplane_core::client::Client;
-use crossplane_core::errors::Result;
-use crossplane_core::resource::Managed;
+use crossplane_core::client::{Client, Patch};
+use crossplane_core::errors::{Result, ResultExt};
+use crossplane_core::meta;
+use crossplane_core::resource::{Managed, Object};
 use crossplane_core::v2::ConnectionDetails;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 
-use super::{ERR_UPDATE_MANAGED, REFERENCE_RESOLVER_FIELD_OWNER};
+use super::{
+    ERR_CREATE_OR_UPDATE_SECRET, ERR_MARSHAL_EXISTING, ERR_MARSHAL_RESOLVED, ERR_PATCH_MANAGED, ERR_RESOLVE_REFERENCES,
+    ERR_UPDATE_CRITICAL_ANNOTATIONS, ERR_UPDATE_MANAGED, REFERENCE_RESOLVER_FIELD_OWNER,
+};
+use crate::resource::{
+    ApiPatchingApplicator, Applicator, ApplicatorWithRetry, ApplyOption, is_api_error_wrapped, is_not_allowed,
+    local_connection_secret_for,
+};
 
 /// Go `Initializer`. The reconciler runs a chain of them.
 pub trait Initializer<M>: Send + Sync + 'static {
@@ -48,10 +58,12 @@ impl NameAsExternalName {
 impl<M: Managed> Initializer<M> for NameAsExternalName {
     fn initialize<'a>(&'a self, mg: &'a mut M) -> BoxFuture<'a, Result<()>> {
         async move {
-            let _ = (&self.client, mg, ERR_UPDATE_MANAGED);
-            // TODO (A:69): external name set -> Ok; else set it to metadata.name and Update,
-            // wrapped in ERR_UPDATE_MANAGED.
-            todo!()
+            if !meta::external_name(mg).is_empty() {
+                return Ok(());
+            }
+            let name = meta::name(mg).to_owned();
+            meta::set_external_name(mg, &name);
+            self.client.update(mg).await.wrap_err(ERR_UPDATE_MANAGED)
         }
         .boxed()
     }
@@ -91,15 +103,85 @@ impl ApiSimpleReferenceResolver {
 impl<M: Managed> ReferenceResolver<M> for ApiSimpleReferenceResolver {
     fn resolve_references<'a>(&'a self, mg: &'a mut M) -> BoxFuture<'a, Result<()>> {
         async move {
-            let _ = (&self.client, mg, REFERENCE_RESOLVER_FIELD_OWNER);
-            // TODO (A:237): before = mg.to_json(); Some(fut) = mg.resolve_references(client) else
-            // return Ok; after = mg.to_json(); equal with empty == nil -> Ok; body = the JSON
-            // merge diff from before to after, always carrying apiVersion and kind;
-            // client.patch(mg, Patch::Apply { body, field_manager, force: true }).
-            todo!()
+            let existing = mg.to_json().wrap_err(ERR_MARSHAL_EXISTING)?;
+            let Some(resolving) = mg.resolve_references(&*self.client) else {
+                return Ok(());
+            };
+            resolving.await.wrap_err(ERR_RESOLVE_REFERENCES)?;
+            let resolved = mg.to_json().wrap_err(ERR_MARSHAL_RESOLVED)?;
+            if without_empty(existing.clone()) == without_empty(resolved.clone()) {
+                return Ok(());
+            }
+            let patch = Patch::Apply {
+                body: prepare_json_merge(existing, &resolved),
+                field_manager: REFERENCE_RESOLVER_FIELD_OWNER.to_owned(),
+                force: true,
+            };
+            self.client.patch(mg, patch).await.wrap_err(ERR_PATCH_MANAGED)
         }
         .boxed()
     }
+}
+
+/// Go `cmpopts.EquateEmpty` on the JSON forms: an empty list or map equals an absent one.
+fn without_empty(v: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k, without_empty(v)))
+                .filter(|(_, v)| !is_empty(v))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.into_iter().map(without_empty).collect()),
+        other => other,
+    }
+}
+
+fn is_empty(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(fields) => fields.is_empty(),
+        serde_json::Value::Array(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+/// Go `prepareJSONMerge` (`A:210-233`): the JSON merge patch from `existing` to `resolved`.
+/// `apiVersion` and `kind` are dropped from `existing` first, so the patch always carries them,
+/// as a server-side apply body must.
+pub(crate) fn prepare_json_merge(mut existing: serde_json::Value, resolved: &serde_json::Value) -> serde_json::Value {
+    if let Some(fields) = existing.as_object_mut() {
+        fields.remove("apiVersion");
+        fields.remove("kind");
+    }
+    create_merge_patch(&existing, resolved)
+}
+
+/// `jsonpatch.CreateMergePatch` (RFC 7386): changed and added keys carry their new value,
+/// removed keys `null`, and a list that differs is replaced whole.
+fn create_merge_patch(from: &serde_json::Value, to: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    let (Value::Object(from), Value::Object(to)) = (from, to) else {
+        return to.clone();
+    };
+    let mut patch = serde_json::Map::new();
+    for (key, new) in to {
+        match from.get(key) {
+            Some(old) if old == new => {}
+            Some(old) if old.is_object() && new.is_object() => {
+                patch.insert(key.clone(), create_merge_patch(old, new));
+            }
+            _ => {
+                patch.insert(key.clone(), new.clone());
+            }
+        }
+    }
+    for key in from.keys().filter(|key| !to.contains_key(*key)) {
+        patch.insert(key.clone(), Value::Null);
+    }
+    Value::Object(patch)
 }
 
 /// Go `CriticalAnnotationUpdater`.
@@ -133,14 +215,45 @@ impl RetryingCriticalAnnotationUpdater {
     }
 }
 
+// client-go `retry.DefaultRetry` (`util/retry/util.go:28-33`); its factor is 1.0, so every wait
+// is the base duration plus jitter.
+const DEFAULT_RETRY_STEPS: u32 = 5;
+const DEFAULT_RETRY_DURATION: Duration = Duration::from_millis(10);
+const DEFAULT_RETRY_JITTER: f64 = 0.1;
+
+impl RetryingCriticalAnnotationUpdater {
+    /// One attempt (`A:287-297`). After a conflict the object is re-read and the saved
+    /// annotations re-applied, so the next attempt writes them onto the latest version; the
+    /// conflict is still returned so the loop retries. Go retries every error but
+    /// `context.Canceled`, and cancellation here is the future being dropped.
+    async fn update_once<M: Managed>(&self, mg: &mut M, annotations: &BTreeMap<String, String>) -> Result<()> {
+        let Err(e) = self.client.update(mg).await else {
+            return Ok(());
+        };
+        if e.is_conflict() {
+            *mg = self.client.get_as::<M>(&(&*mg as &dyn Object).key()).await?;
+            meta::add_annotations(mg, annotations.clone());
+        }
+        Err(e)
+    }
+}
+
 impl<M: Managed> CriticalAnnotationUpdater<M> for RetryingCriticalAnnotationUpdater {
     fn update_critical_annotations<'a>(&'a self, mg: &'a mut M) -> BoxFuture<'a, Result<()>> {
         async move {
-            let _ = (&self.client, mg);
-            // TODO (A:283): Update; on any error except cancellation, Get, re-apply the saved
-            // annotations and retry with client-go's DefaultRetry (5 steps, 10ms, factor 1.0,
-            // jitter 0.1).
-            todo!()
+            let annotations = mg.meta().annotations.clone().unwrap_or_default();
+            let mut attempt = 1;
+            loop {
+                let Err(e) = self.update_once(mg, &annotations).await else {
+                    return Ok(());
+                };
+                if attempt == DEFAULT_RETRY_STEPS {
+                    return Err(e.wrap(ERR_UPDATE_CRITICAL_ANNOTATIONS));
+                }
+                attempt += 1;
+                tokio::time::sleep(DEFAULT_RETRY_DURATION.mul_f64(1.0 + rand::random::<f64>() * DEFAULT_RETRY_JITTER))
+                    .await;
+            }
         }
         .boxed()
     }
@@ -191,23 +304,46 @@ impl<M: Sync + 'static> ConnectionPublisher<M> for ConnectionPublisherFns<M> {
 
 /// Go `APILocalSecretPublisher`. Unpublish is a no-op: garbage collection removes the Secret.
 pub struct ApiLocalSecretPublisher {
-    client: Arc<dyn Client>,
+    secret: Box<dyn Applicator>,
 }
 
 impl ApiLocalSecretPublisher {
+    /// Applies through a patching applicator that retries errors the API server returned.
     pub fn new(client: Arc<dyn Client>) -> Self {
-        Self { client }
+        let patching = Arc::new(ApiPatchingApplicator::new(client));
+        Self::with_applicator(ApplicatorWithRetry::new(patching, is_api_error_wrapped, None))
     }
+
+    pub fn with_applicator(secret: impl Applicator) -> Self {
+        Self {
+            secret: Box::new(secret),
+        }
+    }
+}
+
+/// A Secret's `data`, with an empty map read as absent (Go's `cmpopts.EquateEmpty`).
+fn secret_data(secret: &serde_json::Value) -> Option<&serde_json::Value> {
+    secret.get("data").filter(|data| !is_empty(data))
 }
 
 impl<M: Managed> ConnectionPublisher<M> for ApiLocalSecretPublisher {
     fn publish_connection<'a>(&'a self, mg: &'a M, c: &'a ConnectionDetails) -> BoxFuture<'a, Result<bool>> {
         async move {
-            let _ = (&self.client, mg, c);
-            // TODO (A:158): no writeConnectionSecretToRef -> Ok(false); else apply
-            // local_connection_secret_for with ApiPatchingApplicator, the controllable-by check,
-            // and a skip when `data` is unchanged.
-            todo!()
+            let Some(mut secret) = local_connection_secret_for(mg, c) else {
+                return Ok(false);
+            };
+            let opts = [
+                ApplyOption::ConnectionSecretMustBeControllableBy(mg.meta().uid.clone().unwrap_or_default()),
+                // Writing identical data would be a no-op, so it is not allowed.
+                ApplyOption::AllowUpdateIf(Box::new(|current, desired| {
+                    secret_data(current) != secret_data(desired)
+                })),
+            ];
+            match self.secret.apply(&mut secret, &opts).await {
+                Ok(()) => Ok(true),
+                Err(e) if is_not_allowed(&e) => Ok(false),
+                Err(e) => Err(e.wrap(ERR_CREATE_OR_UPDATE_SECRET)),
+            }
         }
         .boxed()
     }

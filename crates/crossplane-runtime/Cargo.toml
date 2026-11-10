@@ -27,8 +27,15 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 prometheus.workspace = true
+rand.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+prost-types.workspace = true
 
 [dev-dependencies]
 crossplane-test.workspace = true
 serde.workspace = true
-tokio = { workspace = true, features = ["test-util", "io-util"] }
+tokio = { workspace = true, features = ["test-util", "io-util", "net"] }
+tonic = { workspace = true, features = ["server", "router"] }
+tokio-stream = { version = "0.1", features = ["net"] }
