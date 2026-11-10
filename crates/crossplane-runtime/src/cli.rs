@@ -9,7 +9,7 @@
 //!   declares each twin as a hidden field and combines the pair, because clap hands a derive
 //!   struct only the fields it declares:
 //!
-//!   ```ignore
+//!   ```text
 //!   #[arg(long, value_parser = cli::go_bool, overrides_with = "no_debug")]
 //!   debug: bool,
 //!   #[arg(long, hide = true, overrides_with = "debug")]
