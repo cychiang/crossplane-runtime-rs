@@ -1,0 +1,85 @@
+# The first three GETs of the thing fail with 500, so Observe fails before
+# anything is created. The MR reports ReconcileError, then the retry creates
+# the thing. No step reads the thing while the faults are pending, because a
+# read through the proxy would use one up.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: observe-failure
+spec:
+  namespace: parity-observe-failure
+  bindings:
+  - name: ext
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy
+  steps:
+  - name: inject observe faults
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          echo '{"method":"GET","name":"parity-observe-failure","count":3,"status":500}' |
+            kubectl create --raw "$EXT/_faults" -f -
+  - name: failed observe reports ReconcileError
+    try:
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-observe-failure
+          spec:
+            forProvider:
+              configurableField: after-retry
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-observe-failure
+          status:
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcileError
+              message: "observe failed: GET /things/parity-observe-failure: status 500"
+  - name: retry creates the thing
+    try:
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-observe-failure
+          status:
+            atProvider:
+              configurableField: after-retry
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          n=$(kubectl get --raw "$EXT/_calls" | grep '"path":"/things/parity-observe-failure"' | grep '"method":"GET"' | grep -c '"status":500')
+          [ "$n" = 3 ] || { echo "want 3 failed GETs, got $n"; exit 1; }
+  - name: delete
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-observe-failure
+    finally:
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: kubectl delete --raw "$EXT/_faults"

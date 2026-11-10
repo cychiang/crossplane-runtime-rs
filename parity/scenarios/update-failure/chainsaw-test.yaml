@@ -1,0 +1,106 @@
+# After the thing exists, the next three PUTs fail with 500, so only the
+# update fails. The MR reports ReconcileError, then the retry applies the
+# change.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: update-failure
+spec:
+  namespace: parity-update-failure
+  bindings:
+  - name: ext
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy
+  steps:
+  - name: create reaches Ready
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-update-failure
+          spec:
+            forProvider:
+              configurableField: v1
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-update-failure
+          status:
+            atProvider:
+              configurableField: v1
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+  - name: failed update reports ReconcileError
+    try:
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          echo '{"method":"PUT","name":"parity-update-failure","count":3,"status":500}' |
+            kubectl create --raw "$EXT/_faults" -f -
+    - patch:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-update-failure
+          spec:
+            forProvider:
+              configurableField: v2
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-update-failure
+          status:
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcileError
+              message: "update failed: PUT /things/parity-update-failure: status 500"
+  - name: retry applies the update
+    try:
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-update-failure
+          status:
+            atProvider:
+              configurableField: v2
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          calls=$(kubectl get --raw "$EXT/_calls" | grep '"path":"/things/parity-update-failure"')
+          n=$(echo "$calls" | grep '"method":"PUT"' | grep -c '"status":500')
+          [ "$n" = 3 ] || { echo "want 3 failed PUTs, got $n"; exit 1; }
+          kubectl get --raw "$EXT/things/parity-update-failure" | grep -q '"configurableField":"v2"'
+  - name: delete
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-update-failure
+    finally:
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: kubectl delete --raw "$EXT/_faults"

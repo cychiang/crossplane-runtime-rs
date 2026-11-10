@@ -1,0 +1,107 @@
+# A simulation: the MR is created with the crossplane.io/external-create-pending
+# annotation already set, which is the state a provider leaves when it stops
+# after recording that it is about to create and before recording the result.
+# The reconciler refuses to guess and calls nothing. Removing only that
+# annotation does not trigger a reconcile, because the event filter ignores
+# it. A further change does, and the create then goes ahead.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: create-pending
+spec:
+  namespace: parity-create-pending
+  bindings:
+  - name: ext
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy
+  steps:
+  - name: a pending create blocks the MR
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-create-pending
+            annotations:
+              crossplane.io/external-create-pending: "2026-01-01T00:00:00Z"
+          spec:
+            forProvider:
+              configurableField: v1
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-create-pending
+          status:
+            ((conditions[?type == 'Ready'])[0]):
+              status: "False"
+              reason: Creating
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcileError
+              message: cannot determine creation result - remove the crossplane.io/external-create-pending annotation if it is safe to proceed
+  - name: removing the annotation alone does nothing
+    try:
+    - patch:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-create-pending
+            annotations:
+              crossplane.io/external-create-pending: null
+    - sleep:
+        duration: 10s
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-create-pending
+          status:
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcileError
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          n=$(kubectl get --raw "$EXT/_calls" | grep -c '"path":"/things/parity-create-pending"' || true)
+          [ "$n" = 0 ] || { echo "want no calls, got $n"; exit 1; }
+  - name: another change lets the create go ahead
+    try:
+    - patch:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-create-pending
+            labels:
+              parity.example.com/retry: "1"
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-create-pending
+          status:
+            atProvider:
+              configurableField: v1
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+  - name: delete
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-create-pending

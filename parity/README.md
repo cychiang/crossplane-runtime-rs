@@ -122,10 +122,27 @@ level, so chainsaw's own steps stay visible as markers.
 | `pause` | With `crossplane.io/paused` set, Synced is `ReconcilePaused` and a spec change does not reach the thing. Resuming applies it |
 | `observe-only` | `managementPolicies: [Observe]` on a seeded thing reaches Ready without a PUT. Deleting the MR leaves the thing |
 | `create-failure` | Three injected 500s on create give `ReconcileError`. The fourth try succeeds, and the call log has exactly three failed PUTs |
+| `update-failure` | Three injected 500s on the update PUT give `ReconcileError` with `update failed: ...`. The retry applies the change (B46, then B48) |
+| `delete-failure` | Three injected 500s on DELETE keep the finalizer, with `Ready=False/Deleting` and `delete failed: ...`. The fourth try deletes the thing and the MR (B23, B24, B29) |
+| `observe-failure` | Three injected 500s on GET before anything exists give `observe failed: ...`. The retry creates the thing (B19, then B41) |
+| `connection-secret` | `writeConnectionSecretToRef` publishes the connection detail to a Secret the MR controls. A spec change patches the new value in. Deleting the MR removes the Secret through its owner reference (the publisher at the B30 and B47 sites; B48 with update details) |
+| `no-update` | Policies without Update: a spec change is observed (`observedGeneration` 2) but the thing keeps its value. Delete still deletes it (B45, B24, B29) |
+| `no-delete` | Policies without Delete: deleting the MR leaves the created thing in place (B41, then B10) |
+| `policy-edges` | On a missing thing, `[Observe]` reports `observe failed: external resource does not exist` (B20), `[Observe, Update]` reports success without creating (B44), and `[Delete]` is rejected as unsupported before any call (B05) |
+| `create-pending` | A simulation: an MR created with `external-create-pending` already set is refused with `cannot determine creation result ...` and nothing is called (B13). Removing only that annotation triggers no reconcile, because the event filter ignores it. A label change does, and the create goes ahead (B41) |
+| `providerconfig-in-use` | Deleting a ProviderConfig an MR uses leaves it with its finalizer, `users: 1` and `Terminating=True/InUse` (PC4). Deleting the MR releases and deletes it (PC6) |
+| `default-providerconfig-ref` | An MR without `providerConfigRef` gets the CRD default `ClusterProviderConfig`, which this provider lacks, so Connect fails with `connect failed: unsupported provider config kind: ClusterProviderConfig` (B17). Pointing it at the namespaced ProviderConfig fixes it |
+| `poll-interval` | With `crossplane.io/poll-interval: 5s`, a value changed behind the provider's back is put back within 30s, well inside the default 1m poll (B43, then B48) |
 
-Each test runs in its own fixed namespace with its own Secret and namespaced ProviderConfig. Each manifest
-sets `providerConfigRef.kind: ProviderConfig`, because the CRD default `ClusterProviderConfig` does not exist in this
-provider.
+Branch ids (B, PC) are rows of `docs/phase0/02-parity-spec.md` sections 1.3 and 4.1. The spec change while paused
+is covered by `pause`. The `crossplane.io/reconcile-requested-at` annotation is not tested, because the baseline
+`MyType` cannot record reconcile tokens (spec section 3), so the annotation only triggers an ordinary reconcile.
+Faults match by method and name, so a PUT fault injected after the thing exists fails only the update. A scenario
+never reads a thing through the proxy while a GET fault is pending on it, because that read would consume the fault.
+
+Each test runs in its own fixed namespace with its own Secret and namespaced ProviderConfig. Each manifest except
+`default-providerconfig-ref` sets `providerConfigRef.kind: ProviderConfig`, because the CRD default
+`ClusterProviderConfig` does not exist in this provider.
 
 ## Comparing runs
 

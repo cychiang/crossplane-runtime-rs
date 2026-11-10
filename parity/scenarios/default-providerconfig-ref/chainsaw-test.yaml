@@ -1,0 +1,70 @@
+# An MR without providerConfigRef gets the CRD default, a ClusterProviderConfig
+# named default. This provider has no such kind, so Connect fails. Pointing
+# the MR at the namespaced ProviderConfig fixes it.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: default-providerconfig-ref
+spec:
+  namespace: parity-default-providerconfig-ref
+  steps:
+  - name: the default kind cannot connect
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-default-providerconfig-ref
+          spec:
+            forProvider:
+              configurableField: v1
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-default-providerconfig-ref
+          spec:
+            providerConfigRef:
+              name: default
+              kind: ClusterProviderConfig
+          status:
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcileError
+              message: "connect failed: unsupported provider config kind: ClusterProviderConfig"
+  - name: the namespaced ProviderConfig connects
+    try:
+    - patch:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-default-providerconfig-ref
+          spec:
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-default-providerconfig-ref
+          status:
+            atProvider:
+              configurableField: v1
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+  - name: delete
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-default-providerconfig-ref

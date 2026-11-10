@@ -1,0 +1,90 @@
+# managementPolicies without Update: a spec change is observed but never
+# reaches the thing. Delete is allowed, so deleting the MR deletes the thing.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: no-update
+spec:
+  namespace: parity-no-update
+  bindings:
+  - name: thing
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy/things/parity-no-update
+  steps:
+  - name: create reaches Ready
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-no-update
+          spec:
+            managementPolicies: [Observe, Create, Delete, LateInitialize]
+            forProvider:
+              configurableField: v1
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-no-update
+          status:
+            atProvider:
+              configurableField: v1
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+  - name: a spec change is not applied
+    try:
+    - patch:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-no-update
+          spec:
+            forProvider:
+              configurableField: v2
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-no-update
+            generation: 2
+          status:
+            atProvider:
+              configurableField: v1
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+              reason: ReconcileSuccess
+              observedGeneration: 2
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: kubectl get --raw "$THING"
+        check:
+          ($error): ~
+          (json_parse($stdout)):
+            configurableField: v1
+  - name: delete removes the thing
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-no-update
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: |
+          if out=$(kubectl get --raw "$THING" 2>&1); then echo "thing still exists: $out"; exit 1; fi
+          echo "$out" | grep -q NotFound

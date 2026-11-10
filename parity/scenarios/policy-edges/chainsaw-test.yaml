@@ -1,0 +1,123 @@
+# Three management policies the other tests do not reach, each on a thing
+# that does not exist: [Observe] reports that it is missing, a set without
+# Create reports success without creating it, and an unsupported set is
+# rejected before anything else happens.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: policy-edges
+spec:
+  namespace: parity-policy-edges
+  bindings:
+  - name: ext
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy
+  steps:
+  - name: observe-only on a missing thing reports ReconcileError
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-observe-missing
+          spec:
+            managementPolicies: [Observe]
+            forProvider:
+              configurableField: never-created
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-observe-missing
+          status:
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcileError
+              message: "observe failed: external resource does not exist"
+  - name: a set without Create leaves a missing thing missing
+    try:
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-no-create
+          spec:
+            managementPolicies: [Observe, Update]
+            forProvider:
+              configurableField: never-created
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-no-create
+            finalizers:
+            - finalizer.managedresource.crossplane.io
+          status:
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+              reason: ReconcileSuccess
+  - name: an unsupported set is rejected
+    try:
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-bad-policy
+          spec:
+            managementPolicies: [Delete]
+            forProvider:
+              configurableField: never-created
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-bad-policy
+          status:
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcileError
+              message: "`spec.managementPolicies` is set to a value([Delete]) which is not supported. Check docs for supported policies"
+  - name: none of them called the service
+    try:
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          n=$(kubectl get --raw "$EXT/_calls" | grep -E '"path":"/things/parity-(observe-missing|no-create|bad-policy)"' | grep -vc '"method":"GET"' || true)
+          [ "$n" = 0 ] || { echo "want no writes, got $n"; exit 1; }
+          n=$(kubectl get --raw "$EXT/_calls" | grep -c '"path":"/things/parity-bad-policy"' || true)
+          [ "$n" = 0 ] || { echo "want no calls for the rejected policy, got $n"; exit 1; }
+  - name: delete
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-observe-missing
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-no-create
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-bad-policy

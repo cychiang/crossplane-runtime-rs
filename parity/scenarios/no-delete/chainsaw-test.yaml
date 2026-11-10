@@ -1,0 +1,64 @@
+# managementPolicies without Delete: the MR creates the thing, and deleting
+# the MR leaves it in place.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: no-delete
+spec:
+  namespace: parity-no-delete
+  bindings:
+  - name: thing
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy/things/parity-no-delete
+  steps:
+  - name: create reaches Ready
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-no-delete
+          spec:
+            managementPolicies: [Observe, Create, Update, LateInitialize]
+            forProvider:
+              configurableField: v1
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-no-delete
+          status:
+            atProvider:
+              configurableField: v1
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+  - name: deleting the MR keeps the thing
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-no-delete
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: kubectl get --raw "$THING"
+        check:
+          ($error): ~
+          (json_parse($stdout)):
+            configurableField: v1
+    finally:
+    - script:
+        env:
+        - name: THING
+          value: ($thing)
+        content: kubectl delete --raw "$THING"

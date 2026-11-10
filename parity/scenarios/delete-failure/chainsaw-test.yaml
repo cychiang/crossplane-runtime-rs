@@ -1,0 +1,86 @@
+# The first three DELETEs of the thing fail with 500. While they fail the MR
+# keeps its finalizer and reports ReconcileError; the fourth succeeds and the
+# MR goes away.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: delete-failure
+spec:
+  namespace: parity-delete-failure
+  bindings:
+  - name: ext
+    value: /api/v1/namespaces/parity-external/services/http:fake-external:8080/proxy
+  steps:
+  - name: create reaches Ready
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-delete-failure
+          spec:
+            forProvider:
+              configurableField: v1
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-delete-failure
+          status:
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+  - name: failed delete keeps the finalizer
+    try:
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          echo '{"method":"DELETE","name":"parity-delete-failure","count":3,"status":500}' |
+            kubectl create --raw "$EXT/_faults" -f -
+          kubectl -n parity-delete-failure delete mytype.sample.example.com parity-delete-failure --wait=false
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-delete-failure
+            finalizers:
+            - finalizer.managedresource.crossplane.io
+          status:
+            ((conditions[?type == 'Ready'])[0]):
+              status: "False"
+              reason: Deleting
+            ((conditions[?type == 'Synced'])[0]):
+              status: "False"
+              reason: ReconcileError
+              message: "delete failed: DELETE /things/parity-delete-failure: status 500"
+  - name: retry deletes the thing and releases the MR
+    try:
+    - script:
+        timeout: 90s
+        content: kubectl -n parity-delete-failure wait --for=delete mytype.sample.example.com/parity-delete-failure --timeout=80s
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: |
+          n=$(kubectl get --raw "$EXT/_calls" | grep '"path":"/things/parity-delete-failure"' | grep '"method":"DELETE"' | grep -c '"status":500')
+          [ "$n" = 3 ] || { echo "want 3 failed DELETEs, got $n"; exit 1; }
+          if out=$(kubectl get --raw "$EXT/things/parity-delete-failure" 2>&1); then echo "thing still exists: $out"; exit 1; fi
+          echo "$out" | grep -q NotFound
+    finally:
+    - script:
+        env:
+        - name: EXT
+          value: ($ext)
+        content: kubectl delete --raw "$EXT/_faults"

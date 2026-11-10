@@ -1,0 +1,83 @@
+# spec.writeConnectionSecretToRef publishes Observe's connection detail to a
+# Secret the MR controls. A changed value is patched into it. Deleting the MR
+# removes the Secret through its owner reference.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: connection-secret
+spec:
+  namespace: parity-connection-secret
+  steps:
+  - name: create publishes the Secret
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-connection-secret
+          spec:
+            forProvider:
+              configurableField: v1
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+            writeConnectionSecretToRef:
+              name: parity-connection
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-connection-secret
+          status:
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+            ((conditions[?type == 'Synced'])[0]):
+              status: "True"
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: parity-connection
+            ownerReferences:
+            - apiVersion: sample.example.com/v1alpha1
+              kind: MyType
+              name: parity-connection-secret
+              controller: true
+              blockOwnerDeletion: true
+          type: connection.crossplane.io/v1alpha1
+          data:
+            configurableField: djE=
+  - name: an update changes the Secret
+    try:
+    - patch:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-connection-secret
+          spec:
+            forProvider:
+              configurableField: v2
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: parity-connection
+          data:
+            configurableField: djI=
+  - name: delete removes the Secret
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-connection-secret
+    - script:
+        timeout: 90s
+        content: kubectl -n parity-connection-secret wait --for=delete secret/parity-connection --timeout=80s

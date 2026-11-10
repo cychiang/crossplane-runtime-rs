@@ -1,0 +1,71 @@
+# A ProviderConfig that an MR uses is not deleted: it reports InUse and keeps
+# its finalizer. Once the MR is gone, its usage goes with it and the
+# ProviderConfig is deleted.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: providerconfig-in-use
+spec:
+  namespace: parity-providerconfig-in-use
+  steps:
+  - name: create reaches Ready
+    try:
+    - apply:
+        file: ../common/providerconfig.yaml
+    - apply:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-providerconfig-in-use
+          spec:
+            forProvider:
+              configurableField: v1
+            providerConfigRef:
+              name: parity
+              kind: ProviderConfig
+    - assert:
+        resource:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          metadata:
+            name: parity-providerconfig-in-use
+          status:
+            ((conditions[?type == 'Ready'])[0]):
+              status: "True"
+    - assert:
+        resource:
+          apiVersion: example.com/v1alpha1
+          kind: ProviderConfig
+          metadata:
+            name: parity
+          status:
+            users: 1
+  - name: deleting the ProviderConfig is blocked
+    try:
+    - script:
+        content: kubectl -n parity-providerconfig-in-use delete providerconfig.example.com parity --wait=false
+    - assert:
+        resource:
+          apiVersion: example.com/v1alpha1
+          kind: ProviderConfig
+          metadata:
+            name: parity
+            finalizers:
+            - in-use.crossplane.io
+          status:
+            users: 1
+            ((conditions[?type == 'Terminating'])[0]):
+              status: "True"
+              reason: InUse
+              message: Blocking deletion while usages still exist
+  - name: deleting the MR releases it
+    try:
+    - delete:
+        ref:
+          apiVersion: sample.example.com/v1alpha1
+          kind: MyType
+          name: parity-providerconfig-in-use
+    - script:
+        timeout: 90s
+        content: kubectl -n parity-providerconfig-in-use wait --for=delete providerconfig.example.com/parity --timeout=80s
