@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use crossplane_core::client::Client;
+use crossplane_core::client::{Client, Patch};
 use crossplane_core::errors::{Error, Result};
 use crossplane_core::meta;
 use crossplane_core::resource::{Managed, Object};
@@ -312,6 +312,47 @@ async fn resolve_references() {
         let got = r.resolve_references(&mut tc.mg).await;
         test::assert_result(tc.name, tc.reason, &tc.want, &got);
     }
+}
+
+/// The apply a Go provider sends through controller-runtime's typed client, recorded by
+/// `parity/go-checks/ref_test.go`: `apiVersion`, `kind` and the changed fields only, with no
+/// `metadata`, whether or not an update ran earlier in the reconcile.
+#[tokio::test]
+async fn resolve_references_applies_the_go_client_body() {
+    let sent = Arc::new(std::sync::Mutex::new(None));
+    let record = sent.clone();
+    let c = MockClient {
+        patch: Some(Box::new(move |_, patch| {
+            *record.lock().unwrap() = Some(patch.clone());
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let mut mg = referencer(|mg| {
+        mg.spec.write_connection_secret_to_ref = Some(LocalSecretReference {
+            name: "resolved".into(),
+        });
+        Ok(())
+    });
+    mg.metadata.name = Some("x".into());
+    mg.metadata.namespace = Some("default".into());
+    meta::set_external_name(&mut mg, "x");
+
+    ApiSimpleReferenceResolver::new(Arc::new(c))
+        .resolve_references(&mut mg)
+        .await
+        .unwrap();
+
+    let want = Patch::Apply {
+        body: json!({
+            "apiVersion": "fake.crossplane.io/v1",
+            "kind": "Referencer",
+            "spec": {"writeConnectionSecretToRef": {"name": "resolved"}},
+        }),
+        field_manager: REFERENCE_RESOLVER_FIELD_OWNER.to_owned(),
+        force: true,
+    };
+    assert_eq!(Some(want), sent.lock().unwrap().take());
 }
 
 /// Go's fake has neither TypeMeta nor a `metadata` wrapper, so its patch is `{"name":"resolved"}`.
