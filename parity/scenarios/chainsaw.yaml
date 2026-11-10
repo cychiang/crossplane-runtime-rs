@@ -9,6 +9,11 @@ spec:
     delete: 2m
     cleanup: 2m
     exec: 30s
+  # The ProviderConfig controller reconciles once more right after an MR is
+  # gone. Cleanup that deletes the ProviderConfig during that reconcile makes
+  # one of its writes fail with 409, so start cleanup after it settles.
+  cleanup:
+    delayBeforeCleanup: 2s
   execution:
     parallel: 1
     failFast: false
