@@ -187,8 +187,9 @@ fn managed_finds_the_embedded_spec_wherever_it_is_declared() {
 
 #[test]
 fn managed_tracks_reconcile_requests_only_when_the_kind_says_so() {
-    assert!(!<Widget as crossplane_core::resource::Managed>::TRACKS_RECONCILE_REQUESTS);
-    assert!(<Gadget as crossplane_core::resource::Managed>::TRACKS_RECONCILE_REQUESTS);
+    const WIDGET: bool = <Widget as crossplane_core::resource::Managed>::TRACKS_RECONCILE_REQUESTS;
+    const GADGET: bool = <Gadget as crossplane_core::resource::Managed>::TRACKS_RECONCILE_REQUESTS;
+    assert_eq!((false, true), (WIDGET, GADGET));
 
     let mut g = Gadget::new(
         "g",
