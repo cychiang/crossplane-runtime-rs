@@ -35,14 +35,45 @@ enum Repr {
         reason: StatusReason,
         message: String,
     },
+    /// Go's `notControllableError`, `notAllowedError` and `missingRefError`: errors a caller
+    /// recognises by a method, not by text.
+    Kinded {
+        kind: ErrorKind,
+        message: String,
+    },
     DeadlineExceeded,
     Foreign(Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// The Go interface (`NotControllable() bool` and so on) an error satisfies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    NotControllable,
+    NotAllowed,
+    MissingReference,
 }
 
 impl Error {
     /// Go `errors.New`.
     pub fn new(message: impl Into<String>) -> Self {
         Self(Arc::new(Repr::Message(message.into())))
+    }
+
+    /// An error that satisfies one of Go's marker interfaces.
+    pub fn with_kind(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self(Arc::new(Repr::Kinded {
+            kind,
+            message: message.into(),
+        }))
+    }
+
+    /// The marker this error itself satisfies. Like Go's type assertion it does not look through
+    /// a wrap.
+    pub fn kind(&self) -> Option<ErrorKind> {
+        match &*self.0 {
+            Repr::Kinded { kind, .. } => Some(*kind),
+            _ => None,
+        }
     }
 
     /// Go `errors.Wrap(self, message)`.
@@ -95,7 +126,7 @@ impl Error {
         match &*self.0 {
             Repr::Wrapped { cause, .. } => cause.status_reason(),
             Repr::Status { reason, .. } => Some(reason),
-            Repr::Message(_) | Repr::DeadlineExceeded | Repr::Foreign(_) => None,
+            Repr::Message(_) | Repr::Kinded { .. } | Repr::DeadlineExceeded | Repr::Foreign(_) => None,
         }
     }
 
@@ -115,7 +146,9 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &*self.0 {
-            Repr::Message(message) | Repr::Status { message, .. } => f.write_str(message),
+            Repr::Message(message) | Repr::Status { message, .. } | Repr::Kinded { message, .. } => {
+                f.write_str(message)
+            }
             Repr::Wrapped { message, cause } => write!(f, "{message}: {cause}"),
             Repr::DeadlineExceeded => f.write_str("context deadline exceeded"),
             Repr::Foreign(err) => fmt::Display::fmt(err, f),
@@ -134,7 +167,9 @@ impl std::error::Error for Error {}
 /// Go `test.EquateErrors`, extended with the status reason: equal display text and equal reason.
 impl PartialEq for Error {
     fn eq(&self, other: &Self) -> bool {
-        self.to_string() == other.to_string() && self.status_reason() == other.status_reason()
+        self.to_string() == other.to_string()
+            && self.status_reason() == other.status_reason()
+            && self.kind() == other.kind()
     }
 }
 
