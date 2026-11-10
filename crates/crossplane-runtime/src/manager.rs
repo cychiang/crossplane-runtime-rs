@@ -13,9 +13,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::cache::Cache;
-use crate::event::{ApiRecorder, PendingEvent, Recorder};
+use crate::event::{ApiRecorder, MAX_QUEUED_EVENTS, Recorder};
 use crate::kube_client::{self, KubeClient};
 use crate::ratelimiter::Throttle;
+use k8s_openapi::api::core::v1::Event as CoreEvent;
 
 /// How to reach the API server, and how fast. [`RestConfig::infer`] is the only public
 /// constructor and [`Manager::new`] the only consumer, so every request in the process carries
@@ -183,7 +184,7 @@ struct Inner {
     cache: Cache,
     kube: kube::Client,
     options: ManagerOptions,
-    events: mpsc::UnboundedSender<PendingEvent>,
+    events: mpsc::Sender<CoreEvent>,
     metrics: prometheus::Registry,
     runnables: mpsc::UnboundedSender<Box<dyn Runnable>>,
     /// Taken by `start`.
@@ -192,7 +193,7 @@ struct Inner {
 
 struct Pending {
     runnables: mpsc::UnboundedReceiver<Box<dyn Runnable>>,
-    events: mpsc::UnboundedReceiver<PendingEvent>,
+    events: mpsc::Receiver<CoreEvent>,
 }
 
 impl Manager {
@@ -200,7 +201,7 @@ impl Manager {
     pub fn new(config: RestConfig, options: ManagerOptions) -> Result<Self> {
         let kube = config.into_kube_client()?;
         let cache = Cache::new(kube.clone(), options.sync_period);
-        let (events, events_rx) = mpsc::unbounded_channel();
+        let (events, events_rx) = mpsc::channel(MAX_QUEUED_EVENTS);
         let (runnables, runnables_rx) = mpsc::unbounded_channel();
         Ok(Self {
             inner: Arc::new(Inner {

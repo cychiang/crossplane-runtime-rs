@@ -131,3 +131,123 @@ async fn rest_config_throttles_and_sends_the_user_agent() {
         assert!(seen.iter().all(|ua| *ua == user_agent), "{seen:?} != {user_agent}");
     }
 }
+
+/// The Go baseline wrote `CreatedExternalResource`-style events as one POST of a core/v1 Event
+/// named `<object>.<hex nanos>` and then a strategic-merge PATCH of `count`, `lastTimestamp` and
+/// `message` per repeat (`parity/.work/runs/go-a/audit.jsonl`). Twelve identical events must give
+/// one Event with count 12: under the spam burst of 25, and one message so nothing aggregates.
+#[tokio::test]
+async fn the_recorder_writes_one_event_and_patches_its_count() {
+    use crate::event::{ApiRecorder, KubeEventSink, MAX_QUEUED_EVENTS, run_broadcaster};
+    use k8s_openapi::api::core::v1::Event as CoreEvent;
+    use tokio_util::sync::CancellationToken;
+
+    let Some(config) = rest_config("the_recorder_writes_one_event_and_patches_its_count").await else {
+        return;
+    };
+    let user_agent = config.user_agent().to_owned();
+    let kube = config.into_kube_client().unwrap();
+    let client = &KubeClient::uncached(kube.clone());
+    let user_agent = &user_agent;
+    in_namespace(client, "events", |ns| async move {
+        let mut cm = config_map(&ns, "involved");
+        (client as &dyn Client).create(&mut cm).await.expect("create");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(MAX_QUEUED_EVENTS);
+        let cancel = CancellationToken::new();
+        let broadcaster = tokio::spawn(run_broadcaster(
+            std::sync::Arc::new(KubeEventSink::new(kube.clone())),
+            rx,
+            std::sync::Arc::new(crate::clock::SystemClock),
+            crate::event::DEFAULT_SLEEP_DURATION,
+            cancel.clone(),
+        ));
+        let recorder = ApiRecorder::new("managed/mytype.sample.example.com", tx);
+        let recorder = crate::event::Recorder::with_annotations(&recorder, &[("external-name", "ext-1")]);
+        for _ in 0..12 {
+            recorder.event(
+                &cm,
+                crate::event::Event::normal(
+                    crate::event::Reason("PendingExternalResource".into()),
+                    "Waiting for external resource existence to be confirmed",
+                ),
+            );
+        }
+        let api: kube::Api<CoreEvent> = kube::Api::namespaced(kube.clone(), &ns);
+        let mut events = Vec::new();
+        for _ in 0..50 {
+            events = api.list(&Default::default()).await.unwrap().items;
+            if events.first().and_then(|e| e.count) == Some(12) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        cancel.cancel();
+        broadcaster.await.unwrap();
+
+        let shown: Vec<_> = events
+            .iter()
+            .map(|e| (e.metadata.name.clone().unwrap_or_default(), e.count, e.reason.clone()))
+            .collect();
+        eprintln!("events in {ns}: {shown:?}");
+        assert_eq!(events.len(), 1, "one Event object: {shown:?}");
+        let e = &events[0];
+        assert_eq!(e.count, Some(12));
+        let name = e.metadata.name.as_deref().unwrap();
+        let hex = name.strip_prefix("involved.").expect("<object>.<hex>");
+        assert!(hex.len() == 16 && u64::from_str_radix(hex, 16).is_ok(), "{name}");
+        assert_eq!(e.type_.as_deref(), Some("Normal"));
+        assert_eq!(
+            e.source.as_ref().and_then(|s| s.component.as_deref()),
+            Some("managed/mytype.sample.example.com")
+        );
+        assert_eq!(
+            e.reporting_component.as_deref(),
+            Some("managed/mytype.sample.example.com")
+        );
+        assert_eq!(
+            e.metadata.annotations,
+            Some([("external-name".to_owned(), "ext-1".to_owned())].into())
+        );
+        let o = &e.involved_object;
+        assert_eq!(
+            (
+                o.kind.as_deref(),
+                o.api_version.as_deref(),
+                o.name.as_deref(),
+                o.namespace.as_deref()
+            ),
+            (Some("ConfigMap"), Some("v1"), Some("involved"), Some(ns.as_str()))
+        );
+        assert_eq!(o.uid, cm.metadata.uid);
+        assert_eq!(o.resource_version, cm.metadata.resource_version);
+
+        if let Some(audit) = std::env::var_os("XPRS_TEST_AUDIT_LOG") {
+            let mut verbs = Vec::new();
+            for _ in 0..20 {
+                let log = std::fs::read_to_string(&audit).expect("readable audit log");
+                verbs = log
+                    .lines()
+                    .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                    .filter(|a| a["objectRef"]["resource"] == "events" && a["objectRef"]["namespace"] == ns.as_str())
+                    .map(|a| {
+                        assert_eq!(a["userAgent"], user_agent.as_str());
+                        (
+                            a["verb"].as_str().unwrap().to_owned(),
+                            a["responseStatus"]["code"].as_u64().unwrap(),
+                        )
+                    })
+                    .collect();
+                if verbs.len() >= 12 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            eprintln!("audit: event writes in {ns}: {verbs:?}");
+            let mut want = vec![("create".to_owned(), 201)];
+            want.extend(std::iter::repeat_n(("patch".to_owned(), 200), 11));
+            assert_eq!(verbs, want, "one create, then a patch per repeat");
+        }
+    })
+    .await;
+}
