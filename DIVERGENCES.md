@@ -18,7 +18,7 @@ Not listed: places where the port differs from a Go mechanism but behaves the sa
 | Calls to the external service carry no User-Agent. Go's sample client sends `Go-http-client/1.1`. | Deliberate: hyper sets none, and naming Go's client would be false. | External calls `userAgent` field. Not compared; the differ tells provider calls from scenario calls by `X-Forwarded-For`. | `parity/.work/runs/go-a/calls.jsonl`; `examples/provider-sample/src/provider/client.rs` |
 | A transport failure in the sample's HTTP client reads `Get "<url>": client error (Connect): ...`. Go's reads `Get "<url>": dial tcp ...`. | Forced: the cause text comes from hyper, not Go's `net` package. The `<Method> "<url>": ` frame is Go's `url.Error`. | Condition and event messages when the service is unreachable. The `wrapped-error-tail` rule replaces the tail after a runtime prefix. | `examples/provider-sample/src/provider/client_test.rs` `an_unreachable_service_names_the_request`; `parity/README.md` normalization rules |
 | `controller_runtime_*` and `workqueue_*` metrics are not served. The endpoint serves only what a provider registers (`crossplane_managed_resource_*` and the managed reconciler's). | Not ported; no parity layer compares metrics. | Metrics. | `docs/design/core.md` unit 1.9 rest; `decisions.tsv` line 48 |
-| When an event repeats (count above 1) but the correlator produced no patch, Rust creates it. Go's `recordEvent` sends `Patch` with the nil patch and creates only if that finds no event. | Not recorded in the unit's note. | Audit trace of Event writes: a PATCH in Go, a create in Rust, in that case only. Events are compared by (object, type, reason) and message. | `docs/design/core.md` unit 1.9 rest; client-go `tools/record/event.go:330-341`; `crates/crossplane-runtime/src/event.rs` `record_event` |
+| An event that reaches the sink already at count above 1, with no cached observation, is created by Rust. Go's `recordEvent` PATCHes it with a nil patch (an empty body) and creates only if that finds no event. | Not ported: no recorder produces such an event. Both start an event at count 1 (client-go v0.36.3 `tools/record/event.go:504`, `events_cache.go:283`; Rust `make_event`, `Correlator::aggregate`). Count passes 1 only in `eventObserve`'s cached-observation branch, which builds the patch too (`events_cache.go:338-353`, Rust `Correlator::observe`). Go's patch is nil there only if `CreateTwoWayMergePatch` fails, which no recorded event was seen to do. Porting would add a zero-length strategic merge body for a branch nothing reaches. | None: every repeat a recorder sends is a PATCH with the same three fields (`count`, `lastTimestamp`, `message`) on both sides. | `parity/scripts/go-checks.sh` (`TestRepeatAlwaysHasPatch`: counts 1, 2, 3, a patch on each repeat); client-go v0.36.3 `tools/record/event.go:330-341`; `crates/crossplane-runtime/src/event.rs` `record_event`; `event_test.rs` (the `expect_update` table) |
 | A null `eventTime` is left out of the Event body. Go sends `"eventTime":null`. | Forced: k8s-openapi writes an `Option` field only when it is `Some` (its `core/v1/event.rs:292`). | Event request bodies only. The audit policy keeps no bodies. | `docs/design/core.md` unit 1.9 rest |
 | The applicators' merge-patch body always carries `apiVersion` and `kind`. Go marshals a typed object whose TypeMeta may be empty. | Forced: the body comes from `Object::to_json`, which always writes both. | Audit request body of the connection Secret patch: Go's body has neither field. The stored object is the same (checked live: the same merge patch with and without the two fields gave identical Secrets, `managedFields` included). Allowed by `parity/allow/go-vs-rust.jsonl`. | `docs/design/core.md` unit 1.5; `decisions.tsv` line 47; `parity/scripts/diff.sh go-h rust-4`: 3 differences on the `connection-secret` Secret patches, each `.apiVersion: (absent) -> "v1"` and `.kind: (absent) -> "Secret"` |
 | `meta::remove_finalizer` removes every copy of a finalizer. Go's `RemoveFinalizer` removes from the slice it is ranging over, so with a duplicate it panics or leaves a copy, depending on position. Inferred, not run: controller-runtime's panic recovery turns the panic into a reconcile error. | The Rust function uses `retain`; no note says whether copying Go was considered. | Audit trace, only for an object with a duplicate finalizer. | Go `pkg/meta/meta.go:191-200`; `crates/crossplane-core/src/meta.rs` `remove_finalizer`. Go's loop, run at integration: `[a b a]` and `[a a]` panic with `slice bounds out of range`, `[a a b]` leaves `[a b]`. No test pins it. |
@@ -29,6 +29,7 @@ Not listed: places where the port differs from a Go mechanism but behaves the sa
 | The MR metric recorder observes nothing for an object with no creation or deletion timestamp. Go observes the seconds since year one. | The Rust recorder skips a missing timestamp; the note gives no further reason. | Metrics, only for objects without timestamps; objects from the API server always have `creationTimestamp`. | `docs/design/core.md` unit 1.6 |
 | A Rust provider cannot install `transform_strip_crd_schema` in its cache, since the cache has no public options. A Go provider can, through `cache.Options`. | The baseline does not install it, so the Rust cache matches the baseline by keeping whole CRDs. | None: memory use only. | `docs/design/core.md` units 1.7 and 1.8 and "Integration"; baseline `cmd/provider/main.go:95-97` |
 | The sample's `main.rs` reads only the environment variables Go names with `Envar(...)`. Go's kingpin app also sets `DefaultEnvars()`, which derives a variable for every flag. | Recorded in the scaffold notes; not ported. | None unless a deployment sets a flag through a derived variable, which the Rust binary would ignore. | `docs/design/core.md` "Implementation reconciliation"; baseline `cmd/provider/main.go:57`; `examples/provider-sample/src/main.rs` |
+| With `KUBECONFIG` unset, `RestConfig::infer` (kube's `Config::infer`) loads `~/.kube/config` before in-cluster config, and falls back to in-cluster config after any kubeconfig error. Go's `ctrl.GetConfig` tries in-cluster config first when `KUBECONFIG` is unset, and falls back to it only for an empty or missing kubeconfig; a malformed one is an error. | Follows from kube's `Config::infer`; no note says whether Go's order was considered. | None in a provider pod: `KUBECONFIG` is unset and there is no home kubeconfig, so both use in-cluster config. A binary run outside a cluster with a home kubeconfig uses it on both sides. | controller-runtime v0.24.1 `pkg/client/config/config.go:115-154`; client-go v0.36.3 `tools/clientcmd/merged_client_builder.go:104-124`; kube-client 5.0.0 `src/config/mod.rs:237-254`; `crates/crossplane-runtime/src/manager.rs` `RestConfig::infer` |
 | Legacy cluster-scoped managed resources, the legacy usage-kind probe (`legacyPCU`), the legacy Secret publisher, composition wrapper clients and scheme helpers are not ported. | Deliberate scope: modern namespaced resources only. | None for the baseline, whose kinds are namespaced. | `decisions.tsv` lines 8, 11, 17; `docs/port-skips.tsv` |
 | The body of a metadata update (PUT to the main resource) carries no `status` until the object has one. Go marshals its zero-value status struct, so its body has `"status":{}` for a ProviderConfig and `"status":{"atProvider":{"configurableField":""}}` for the sample `MyType`. | Forced: kube's derived kinds hold status as an `Option`, written only when present. Go's status is a non-pointer struct. | Audit request body of the first metadata updates of an object. The stored object is the same: the API server ignores `status` on a write to the main resource when the CRD has a status subresource (checked live: a replace carrying `status.users: 42` stored `status: {}`). Allowed by `parity/allow/go-vs-rust.jsonl`. | `parity/scripts/diff.sh go-a rust-1`: 13 differences, all of this form, and none with the allowance. |
 
@@ -38,20 +39,25 @@ is none: the non-test patch call sites are the patching applicator (a merge patc
 sink (a strategic merge patch of a repeated event, as client-go's), in
 `crates/crossplane-runtime/src/{resource/applicator.rs,reconciler/managed/collaborators.rs,event.rs}`.
 
-## Unverified
+Checked equal, not listed above. `parity/scripts/go-checks.sh` runs each against the baseline's module versions, with no cluster.
 
-- **The reference resolver's apply-patch body.** Rust builds it in the kind's wire shape, with
-  `apiVersion`, `kind` and `metadata.name`. Go's ported test expects `{"name":"resolved"}`, but
-  that comes from Go's fake, which has no TypeMeta (`docs/design/core.md` unit 1.6,
-  `TestPrepareJSONMerge`). Whether a real Go provider's body differs is not known. The baseline
-  kind has no references, so the resolver never patches in a parity run. A trace from a
-  provider with a reference field would settle it.
-- **Pointing the manager at a chosen kubeconfig.** `RestConfig::infer` reads only the
-  environment (`KUBECONFIG`, then in-cluster config). The Go baseline calls `ctrl.GetConfig`,
-  which also reads a `--kubeconfig` flag registered on Go's `flag` set. The baseline parses its
-  flags with kingpin, so whether that flag is ever parsed is not known. Running the baseline
-  binary with `--kubeconfig` would settle it.
-- **A reconcile cycle runs slightly longer (mostly fixed).** The provider removes an MR's
+- **The reference resolver's apply body.** A Go provider's resolver sends `apiVersion`, `kind` and the changed fields, with no
+  `metadata` unless resolution changed it. The cached `Get` sets the GVK (controller-runtime v0.24.1
+  `pkg/cache/internal/cache_reader.go:104`), and the client restores it after every typed write (`pkg/client/client.go:267`), so
+  an earlier `Update` in the same reconcile (`NameAsExternalName`) does not clear it. `prepareJSONMerge` blanks the existing
+  object's GVK, so both type fields reach the patch. `TestAfterCachedGet` and `TestAfterTypedUpdate` run the real
+  `APISimpleReferenceResolver` through controller-runtime's typed client against a recording HTTP server. Both bodies are
+  `{"apiVersion":...,"kind":"MyType","spec":{...}}`. The Rust body has the same shape (`api_test.rs`
+  `resolve_references_applies_the_go_client_body`). The `metadata.name` in the ported `TestPrepareJSONMerge` is there
+  only because that case changes the name.
+- **`--kubeconfig`.** Neither binary takes it. `ctrl.GetConfig` registers it on Go's `flag.CommandLine`, which the baseline
+  never parses: kingpin parses `os.Args`, prints `error: unknown long flag '--kubeconfig', try --help` and exits 1, and
+  `--help` does not list the flag. Matching the baseline therefore needs no flag in the Rust template. A provider that wants one
+  would parse it itself and build its config from that path.
+
+## Explained
+
+- **A delayed requeue fires about 0.7ms later than Go's.** The provider removes an MR's
   finalizer after the 30s creation grace period, at the end of a chain of rate-limited requeues,
   so the delay from the scenario's delete to that update sums every requeue's reconcile time
   (`parity/scripts/finalizer-lag.py`). Medians: Go 31012 to 31013ms (go-h to go-l); Rust 31046
@@ -60,7 +66,7 @@ sink (a strategic merge patch of a repeated event, as client-go's), in
   every connect, so every reconcile opened a new connection to the external service; Go's
   `http.Client` reuses `http.DefaultTransport`. Why a new connection cost several ms (DNS
   search-path lookups, TCP connect) was inferred, not measured. About 6ms of excess over the
-  chain remains unexplained. The excess lag had pushed Rust's last ProviderConfig writes into
+  chain was left, explained below. The excess lag had pushed Rust's last ProviderConfig writes into
   the cleanup window: without a cleanup delay, the gap from the last ProviderConfig
   write to cleanup's delete was at least 31ms on Go (go-h to go-j) and as little as 0 to 1ms on
   Rust (rust-4 to rust-6), which had ProviderConfig 409s in five tests against one in go-h
@@ -68,3 +74,24 @@ sink (a strategic merge patch of a repeated event, as client-go's), in
   (1 to 20ms) were too few samples to show the change.
   With the shared pool and no cleanup delay, rust-nodelay-1 to 3 are each equal to go-h, go-i and
   go-j (9 of 9), with a smallest gap of 12 to 29ms, so the scenarios run without the delay.
+  The rest of the excess is the timer. The chain is six reconciles: one on the delete, then
+  requeues after 1, 2, 4, 8 and 16s. Between the provider's writes, the 2, 4, 8 and 16s gaps run
+  a median 0.9 to 1.5ms over nominal on Go (go-h to go-l) and 1.6 to 2.4ms on Rust (rust-pool-1,
+  rust-nodelay-1 to 3); the 1s gap, which also carries the first reconcile, is 1003.7 to 1004.8ms
+  on Go and 1004.8 to 1005.5ms on Rust. The delete-to-first-write interval is level (3.2 to
+  3.7ms on both), so the excess comes once per delayed wake-up, not from one slow reconcile. tokio rounds every sleep deadline
+  up to the end of a millisecond (tokio 1.54.1 `runtime/time/source.rs:17-19`). Go's priority
+  queue waits on Go's runtime timer (`time.Tick`, controller-runtime v0.24.1
+  `pkg/controller/priorityqueue/priorityqueue.go:335`). Measured on Linux, in a container on the Docker daemon the kind cluster uses
+  (`parity/timer-probe/run.sh`, 3 rounds): a tokio `sleep_until` 50ms plus a sub-millisecond
+  offset away fires a median 1.40 to 1.57ms late, and controller-runtime's `AddAfter` then `Get`
+  0.62 to 0.77ms late. That is about 0.7ms a wake, about 3.5ms over five wakes. The Rust queue
+  adds nothing to tokio's sleep: `probe_add_after_overshoot` in `workqueue_test.rs` (macOS,
+  release) gives a median 2.64ms for `add_after` then `get` against 2.65ms for a bare sleep.
+  No gap shows a rate-limiter error: each is its nominal 1, 2, 4, 8 or 16s plus about a millisecond.
+  Not changed: matching Go would mean waking early on tokio's timer and finishing the wait on a
+  finer clock, for 0.7ms a requeue that no parity layer shows. A smaller per-reconcile cost was
+  seen in the run's own log: under `--debug` the Rust filter is `debug` for every crate, so
+  hyper, tower and kube's client log each request (24472 lines in rust-nodelay-1 against 590 in
+  go-k), 10 to 15us apart. That is roughly 0.1ms a reconcile; it was inferred from the
+  timestamps, not measured apart.
