@@ -708,3 +708,150 @@ async fn a_second_elector_takes_over_an_abandoned_lease() {
     })
     .await;
 }
+
+/// The baseline `MyType` with Crossplane's managed spec and status, for code that needs `Managed`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct ManagedMyType {
+    metadata: ObjectMeta,
+    spec: ManagedMyTypeSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<crossplane_core::v2::ManagedResourceStatus>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct ManagedMyTypeSpec {
+    #[serde(flatten)]
+    managed: crossplane_core::v2::ManagedResourceSpec,
+    #[serde(rename = "forProvider", default)]
+    for_provider: serde_json::Value,
+}
+
+impl kube::Resource for ManagedMyType {
+    type DynamicType = ();
+    type Scope = kube::core::NamespaceResourceScope;
+
+    fn kind(_: &()) -> std::borrow::Cow<'_, str> {
+        "MyType".into()
+    }
+    fn group(_: &()) -> std::borrow::Cow<'_, str> {
+        "sample.example.com".into()
+    }
+    fn version(_: &()) -> std::borrow::Cow<'_, str> {
+        "v1alpha1".into()
+    }
+    fn plural(_: &()) -> std::borrow::Cow<'_, str> {
+        "mytypes".into()
+    }
+    fn meta(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+    fn meta_mut(&mut self) -> &mut ObjectMeta {
+        &mut self.metadata
+    }
+}
+
+impl crossplane_core::resource::Managed for ManagedMyType {
+    fn managed_spec(&self) -> &crossplane_core::v2::ManagedResourceSpec {
+        &self.spec.managed
+    }
+    fn managed_spec_mut(&mut self) -> &mut crossplane_core::v2::ManagedResourceSpec {
+        &mut self.spec.managed
+    }
+    fn managed_status(&self) -> Option<&crossplane_core::v2::ManagedResourceStatus> {
+        self.status.as_ref()
+    }
+    fn managed_status_mut(&mut self) -> &mut crossplane_core::v2::ManagedResourceStatus {
+        self.status.get_or_insert_default()
+    }
+}
+
+/// A plain HTTP/1.0 GET, enough for the metrics endpoint.
+async fn http_get(address: std::net::SocketAddr, path: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    let status = response.split(' ').nth(1).unwrap().parse().unwrap();
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_owned())
+        .unwrap_or_default();
+    (status, body)
+}
+
+#[tokio::test]
+async fn the_metrics_endpoint_serves_managed_resource_state() {
+    use crate::manager::{Manager, ManagerOptions};
+    use crate::statemetrics::{MrStateMetrics, MrStateRecorder};
+
+    let Some(config) = rest_config("the_metrics_endpoint_serves_managed_resource_state").await else {
+        return;
+    };
+    let mgr = Manager::new(
+        config,
+        ManagerOptions {
+            metrics_bind_address: "127.0.0.1:0".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let metrics = MrStateMetrics::new();
+    mgr.register_metrics(Box::new(metrics.clone())).unwrap();
+    mgr.add(MrStateRecorder::<ManagedMyType>::new(
+        mgr.client(),
+        metrics,
+        Duration::from_millis(500),
+    ))
+    .unwrap();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let running = tokio::spawn({
+        let (mgr, stop) = (mgr.clone(), stop.clone());
+        async move { mgr.start(stop.cancelled_owned()).await }
+    });
+    let client = mgr.client();
+    let client = &*client;
+    let mgr = &mgr;
+    in_namespace(client, "metrics", |ns| async move {
+        for name in ["a", "b"] {
+            client.create(&mut my_type(&ns, name)).await.unwrap();
+        }
+        let address = eventually("the metrics listener", || async { mgr.metrics_address() }).await;
+        let label = r#"{gvk="sample.example.com/v1alpha1, Kind=MyType"}"#;
+        let value = |body: &str, name: &str| -> Option<usize> {
+            let prefix = format!("crossplane_managed_resource_{name}{label} ");
+            body.lines().find_map(|l| l.strip_prefix(&prefix)?.parse().ok())
+        };
+        let body = eventually("the gauges to count every MyType", || async {
+            let all: Vec<ManagedMyType> = client.list_as(&Default::default()).await.ok()?;
+            let (status, body) = http_get(address, "/metrics").await;
+            assert_eq!(status, 200);
+            (value(&body, "exists") == Some(all.len()) && all.len() >= 2).then_some(body)
+        })
+        .await;
+        let names: std::collections::BTreeSet<_> =
+            body.lines().filter(|l| l.starts_with("# HELP crossplane_")).collect();
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            [
+                "# HELP crossplane_managed_resource_exists The number of managed resources that exist",
+                "# HELP crossplane_managed_resource_ready The number of managed resources in Ready=True state",
+                "# HELP crossplane_managed_resource_synced The number of managed resources in Synced=True state",
+            ],
+            "Go's names and help text"
+        );
+        eprintln!(
+            "metrics: exists {:?} ready {:?} synced {:?}",
+            value(&body, "exists"),
+            value(&body, "ready"),
+            value(&body, "synced")
+        );
+        assert_eq!(http_get(address, "/").await.0, 404);
+    })
+    .await;
+    stop.cancel();
+    running.await.unwrap().expect("the manager stops cleanly");
+}
