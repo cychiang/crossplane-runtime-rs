@@ -627,20 +627,19 @@ async fn a_missing_provider_config_logs_the_request_and_the_cause() {
 }
 
 #[tokio::test]
-async fn a_reconcile_logs_the_provider_config_and_its_usages() {
+async fn a_failed_update_logs_the_provider_config_and_its_usages() {
     let r = reconciler(MockClient {
         get: Some(new_mock_get_fn(|| pc_named(Some("ns")))),
         list: Some(new_mock_list_fn(|| vec![controlled_usage(), controlled_usage()])),
-        update: Some(new_mock_update_fn(None)),
-        update_status: Some(new_mock_sub_resource_update_fn(None)),
+        update: Some(new_mock_update_fn(Some(boom()))),
         ..Default::default()
     });
     let req = ObjectKey::namespaced("ns", "my-pc");
     let (_, logged) = crate::logging::capture(r.reconcile(&req)).await;
     let line = logged
         .lines()
-        .find(|l| l.contains(": Reconciling"))
-        .expect("Reconciling");
+        .find(|l| l.contains(": cannot update ProviderConfig"))
+        .unwrap_or_else(|| panic!("no update failure in:\n{logged}"));
     assert!(line.contains(r#"request={"name":"my-pc","namespace":"ns"}"#), "{line}");
     assert!(line.contains(r#"name="my-pc""#), "{line}");
     assert!(line.contains(r#"namespace="ns""#), "{line}");
