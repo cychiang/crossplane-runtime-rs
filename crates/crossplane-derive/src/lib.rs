@@ -473,3 +473,98 @@ fn expand_inline(input: &DeriveInput) -> syn::Result<TokenStream2> {
     });
     Ok(quote!(#(#impls)*))
 }
+
+/// Misuse that only rustc can see, because the derive checks the shape of the struct and not the
+/// types behind its paths. Each example fails with the named error code.
+///
+/// A status type that does not expose the embedded `ManagedResourceStatus`:
+///
+/// ```compile_fail,E0277
+/// use crossplane_core::v2::ManagedResourceSpec;
+/// use crossplane_core::Managed;
+/// use kube::CustomResource;
+/// use schemars::JsonSchema;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+/// struct Status {
+///     phase: String,
+/// }
+///
+/// #[derive(CustomResource, Managed, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+/// #[kube(group = "x.example.com", version = "v1", kind = "W", namespaced, status = "Status")]
+/// struct WSpec {
+///     #[serde(flatten)]
+///     managed: ManagedResourceSpec,
+/// }
+/// ```
+///
+/// A provider config whose status does not embed `ProviderConfigStatus`:
+///
+/// ```compile_fail,E0277
+/// use crossplane_core::ProviderConfig;
+/// use kube::CustomResource;
+/// use schemars::JsonSchema;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+/// struct Status {}
+///
+/// #[derive(CustomResource, ProviderConfig, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+/// #[kube(group = "x.example.com", version = "v1", kind = "C", namespaced, status = "Status")]
+/// struct CSpec {
+///     region: String,
+/// }
+/// ```
+///
+/// `Inline` only exposes `#[serde(flatten)]` fields, so a field that is not flattened is not an
+/// `AsRef` target:
+///
+/// ```compile_fail,E0277
+/// use crossplane_core::v2::ManagedResourceStatus;
+/// use crossplane_core::Inline;
+///
+/// #[derive(Inline, Default)]
+/// struct Status {
+///     inner: ManagedResourceStatus,
+/// }
+///
+/// fn needs<S: AsRef<ManagedResourceStatus>>(_: &S) {}
+/// needs(&Status::default());
+/// ```
+///
+/// A reference whose referenced kind is not a managed resource:
+///
+/// ```compile_fail,E0277
+/// use crossplane_core::v2::{ManagedResourceSpec, ManagedResourceStatus};
+/// use crossplane_core::{Inline, Managed};
+/// use kube::CustomResource;
+/// use schemars::JsonSchema;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Inline, Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+/// struct Status {
+///     #[serde(flatten)]
+///     managed: ManagedResourceStatus,
+/// }
+///
+/// #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+/// struct Params {
+///     target: Option<String>,
+/// }
+///
+/// #[derive(CustomResource, Managed, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+/// #[kube(group = "x.example.com", version = "v1", kind = "W", namespaced, status = "Status")]
+/// #[crossplane(reference(path = "params.target", to = String))]
+/// struct WSpec {
+///     #[serde(flatten)]
+///     managed: ManagedResourceSpec,
+///     params: Params,
+/// }
+/// ```
+#[cfg(doctest)]
+mod compile_fail_doctests {}
+
+#[cfg(test)]
+#[path = "expand_test.rs"]
+mod tests;
