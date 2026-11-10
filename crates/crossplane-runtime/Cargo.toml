@@ -12,10 +12,11 @@ workspace = true
 
 [dependencies]
 crossplane-core.workspace = true
-kube = { workspace = true, features = ["client", "runtime", "rustls-tls"] }
+kube = { workspace = true, features = ["client", "runtime", "rustls-tls", "ring"] }
 k8s-openapi.workspace = true
 serde_json.workspace = true
 futures.workspace = true
+http.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
@@ -24,4 +25,5 @@ prometheus.workspace = true
 
 [dev-dependencies]
 crossplane-test.workspace = true
+serde.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

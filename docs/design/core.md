@@ -224,6 +224,51 @@ Deviations of the scaffold from the synthesis brief:
   - `duration::parse` rejects negative durations; the Go function accepts them and `GetPollInterval`
     drops them, so the result is the same.
 
+Unit 1.4 (client seam, test support):
+
+- `KubeClient::uncached(kube)` reads the API server directly (Go `client.New`); `KubeClient::new`
+  keeps the cache seam for 1.9. `kube_client::connect(config, user_agent)` builds the one
+  `kube::Client` and sends the User-Agent as a default header (kube has no `UserAgent` field);
+  `RestConfig::into_kube_client` should call it. `RestConfig` itself is still 1.9's `todo!()`.
+  Go's baseline sends `crossplane-provider-baseline-provider/v0.0.0 (linux/arm64) kubernetes/$Format`
+  (audit log): client-go's `DefaultKubernetesUserAgent` (`rest/config.go:530`) uses
+  `version.Get()`, the client-go build version, cut at the first `-`, and the commit cut to
+  seven characters, not the provider's version.
+- The runtime's `kube` gained the `ring` feature: `rustls-tls` alone selects no crypto provider
+  and the first connect panics.
+- `convert_error` follows apimachinery's `IsNotFound`/`IsConflict`/`IsForbidden`/`IsInvalid`:
+  the reason when it is a known one, else the HTTP code.
+- `ObjectType::group_kind` and its `Debug` form match Go's `GroupKind`/`GroupVersionKind`
+  `String()` for the core group (`ConfigMap`, `/v1, Kind=ConfigMap`).
+- `Managed`, `ProviderConfig` and `ProviderConfigUsage` gained the setters and getters of Go's
+  interfaces (and of `ObservedStatus` on `Managed`) as provided methods, so derives are
+  unchanged.
+- `assert_object_eq` (and the new `assert_conditions_eq`) follow Go's `Condition.Equal`, which
+  ignores `observedGeneration` when either side is zero. `Condition::equal` in `v2/condition.rs`
+  (unit 1.2) does not, so (inferred from reading both, not run) `set_conditions` replaces a
+  condition Go would keep.
+- Go test patterns with no direct counterpart: `NewMockGetFn(err, fns...)` that fills the object
+  and fails (`pkg/reconciler/managed/api_test.go:570` `UpdateConflictGetError` expects the caller's
+  object filled after a failed get; a returned-object `get` cannot express it); `NewMockGetFn(nil)`
+  where the Go object passed in is the caller's copy (the applicators), so the case must build
+  that object in `new_mock_get_fn`; `fake.Manager` (builders take the client); `fake.GVK` and
+  `fake.SchemeWith` (`ObjectType::of`); `NewMockClient()` (no in-scope table uses it);
+  `fake.Managed` (use `fake::ModernManaged`); `NewMockPatchFn(nil, fn)` and raw `MockList` /
+  `MockGet` closures (a boxed closure in the `MockClient` field, which also sees the
+  `ListOptions` and `ObjectType`); `mockSimpleReferencer` with `MockResolveReferences`
+  (`pkg/reconciler/managed/api_test.go:373`, local to that test, so its port defines a local kind
+  overriding `Managed::resolve_references`). The embeds `Manageable`,
+  `TypedProviderConfigReferencer`, `LocalConnectionSecretWriterTo` and `ObservedStatus` are the
+  `Managed` accessors; `fake.MockLocalConnectionSecretOwner` is any `Managed` kind with
+  `write_connection_secret_to_reference`. None, legacy: `fake.LegacyManaged`,
+  `LegacyProviderConfigUsage`, `LegacyProviderConfigReferencer`,
+  `RequiredProviderConfigReferencer`, `Orphanable`, `ConnectionSecretWriterTo`,
+  `MockConnectionSecretOwner`. None, composition: `fake.Composite`, `Composed`,
+  `CompositeClaim`.
+- Open question 7: Update overwriting the in-memory object is now tested at the seam
+  (`crossplane-test/tests/support.rs`, `new_mock_response_fn`) and against a real API server
+  (`kube_client_test.rs`: a status set in memory is gone after the PUT). No Go table case pins it.
+
 ## Verification
 
 Rerun these; each was run on the scaffold.
