@@ -18,6 +18,8 @@ mod metrics;
 pub mod policy;
 
 #[cfg(test)]
+mod api_test;
+#[cfg(test)]
 mod changelogger_test;
 #[cfg(test)]
 mod policy_test;

@@ -16,8 +16,12 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 
 use super::{
-    ERR_MARSHAL_EXISTING, ERR_MARSHAL_RESOLVED, ERR_PATCH_MANAGED, ERR_RESOLVE_REFERENCES,
+    ERR_CREATE_OR_UPDATE_SECRET, ERR_MARSHAL_EXISTING, ERR_MARSHAL_RESOLVED, ERR_PATCH_MANAGED, ERR_RESOLVE_REFERENCES,
     ERR_UPDATE_CRITICAL_ANNOTATIONS, ERR_UPDATE_MANAGED, REFERENCE_RESOLVER_FIELD_OWNER,
+};
+use crate::resource::{
+    ApiPatchingApplicator, Applicator, ApplicatorWithRetry, ApplyOption, is_api_error_wrapped, is_not_allowed,
+    local_connection_secret_for,
 };
 
 /// Go `Initializer`. The reconciler runs a chain of them.
@@ -300,25 +304,46 @@ impl<M: Sync + 'static> ConnectionPublisher<M> for ConnectionPublisherFns<M> {
 
 /// Go `APILocalSecretPublisher`. Unpublish is a no-op: garbage collection removes the Secret.
 pub struct ApiLocalSecretPublisher {
-    client: Arc<dyn Client>,
+    secret: Box<dyn Applicator>,
 }
 
 impl ApiLocalSecretPublisher {
+    /// Applies through a patching applicator that retries errors the API server returned.
     pub fn new(client: Arc<dyn Client>) -> Self {
-        Self { client }
+        let patching = Arc::new(ApiPatchingApplicator::new(client));
+        Self::with_applicator(ApplicatorWithRetry::new(patching, is_api_error_wrapped, None))
     }
+
+    pub fn with_applicator(secret: impl Applicator) -> Self {
+        Self {
+            secret: Box::new(secret),
+        }
+    }
+}
+
+/// A Secret's `data`, with an empty map read as absent (Go's `cmpopts.EquateEmpty`).
+fn secret_data(secret: &serde_json::Value) -> Option<&serde_json::Value> {
+    secret.get("data").filter(|data| !is_empty(data))
 }
 
 impl<M: Managed> ConnectionPublisher<M> for ApiLocalSecretPublisher {
     fn publish_connection<'a>(&'a self, mg: &'a M, c: &'a ConnectionDetails) -> BoxFuture<'a, Result<bool>> {
         async move {
-            if mg.write_connection_secret_to_reference().is_none() {
+            let Some(mut secret) = local_connection_secret_for(mg, c) else {
                 return Ok(false);
+            };
+            let opts = [
+                ApplyOption::ConnectionSecretMustBeControllableBy(mg.meta().uid.clone().unwrap_or_default()),
+                // Writing identical data would be a no-op, so it is not allowed.
+                ApplyOption::AllowUpdateIf(Box::new(|current, desired| {
+                    secret_data(current) != secret_data(desired)
+                })),
+            ];
+            match self.secret.apply(&mut secret, &opts).await {
+                Ok(()) => Ok(true),
+                Err(e) if is_not_allowed(&e) => Ok(false),
+                Err(e) => Err(e.wrap(ERR_CREATE_OR_UPDATE_SECRET)),
             }
-            let _ = (&self.client, c);
-            // TODO (A:163): apply local_connection_secret_for with ApiPatchingApplicator, the
-            // controllable-by check, and a skip when `data` is unchanged.
-            todo!()
         }
         .boxed()
     }

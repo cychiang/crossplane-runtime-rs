@@ -32,7 +32,7 @@ fn up_to_date_reconciler(client: MockClient) -> ReconcilerBuilder<Mg> {
         .finalizer(add_finalizer(|| Ok(())))
 }
 
-struct PollCase {
+struct Case {
     name: &'static str,
     reason: &'static str,
     poll_interval: Duration,
@@ -45,7 +45,7 @@ struct PollCase {
 fn effective_poll_interval() {
     let cases = [
         // go: pkg/reconciler/managed TestEffectivePollInterval/NoAnnotationReturnsDefault
-        PollCase {
+        Case {
             name: "NoAnnotationReturnsDefault",
             reason: "When no annotation is set, the default poll interval is returned.",
             poll_interval: 10 * MINUTE,
@@ -54,7 +54,7 @@ fn effective_poll_interval() {
             want: 10 * MINUTE,
         },
         // go: pkg/reconciler/managed TestEffectivePollInterval/ValidAnnotationAboveMinimumReturnsAnnotation
-        PollCase {
+        Case {
             name: "ValidAnnotationAboveMinimumReturnsAnnotation",
             reason: "When the annotation is at or above the minimum, it overrides the default.",
             poll_interval: 10 * MINUTE,
@@ -63,7 +63,7 @@ fn effective_poll_interval() {
             want: 24 * HOUR,
         },
         // go: pkg/reconciler/managed TestEffectivePollInterval/ValidAnnotationAtMinimumReturnsAnnotation
-        PollCase {
+        Case {
             name: "ValidAnnotationAtMinimumReturnsAnnotation",
             reason: "When the annotation equals the minimum exactly, it is returned as-is.",
             poll_interval: 10 * MINUTE,
@@ -72,7 +72,7 @@ fn effective_poll_interval() {
             want: 30 * SECOND,
         },
         // go: pkg/reconciler/managed TestEffectivePollInterval/ValidAnnotationBelowMinimumReturnsMinimum
-        PollCase {
+        Case {
             name: "ValidAnnotationBelowMinimumReturnsMinimum",
             reason: "When the annotation is below the minimum, the minimum is returned.",
             poll_interval: 10 * MINUTE,
@@ -81,7 +81,7 @@ fn effective_poll_interval() {
             want: 30 * SECOND,
         },
         // go: pkg/reconciler/managed TestEffectivePollInterval/InvalidAnnotationReturnsDefault
-        PollCase {
+        Case {
             name: "InvalidAnnotationReturnsDefault",
             reason: "When the annotation cannot be parsed, the default poll interval is returned.",
             poll_interval: 5 * MINUTE,
@@ -107,7 +107,7 @@ fn effective_poll_interval() {
 async fn reconcile_poll_interval_annotation() {
     let cases = [
         // go: pkg/reconciler/managed TestReconcilePollIntervalAnnotation/AnnotationOverridesPollInterval
-        PollCase {
+        Case {
             name: "AnnotationOverridesPollInterval",
             reason: "When a valid poll interval annotation is set, it should override the controller-level poll interval.",
             poll_interval: MINUTE,
@@ -116,7 +116,7 @@ async fn reconcile_poll_interval_annotation() {
             want: 24 * HOUR,
         },
         // go: pkg/reconciler/managed TestReconcilePollIntervalAnnotation/InvalidAnnotationFallsBack
-        PollCase {
+        Case {
             name: "InvalidAnnotationFallsBack",
             reason: "When an invalid poll interval annotation is set, the controller-level poll interval should be used.",
             poll_interval: 5 * MINUTE,
@@ -125,7 +125,7 @@ async fn reconcile_poll_interval_annotation() {
             want: 5 * MINUTE,
         },
         // go: pkg/reconciler/managed TestReconcilePollIntervalAnnotation/AnnotationBelowMinimumClampsToMin
-        PollCase {
+        Case {
             name: "AnnotationBelowMinimumClampsToMin",
             reason: "When a poll interval annotation is below the configured minimum, the minimum should be used.",
             poll_interval: 10 * MINUTE,
@@ -134,7 +134,7 @@ async fn reconcile_poll_interval_annotation() {
             want: 30 * SECOND,
         },
         // go: pkg/reconciler/managed TestReconcilePollIntervalAnnotation/NoAnnotationUsesDefault
-        PollCase {
+        Case {
             name: "NoAnnotationUsesDefault",
             reason: "When no poll interval annotation is set, the controller-level poll interval should be used.",
             poll_interval: 10 * MINUTE,

@@ -106,6 +106,12 @@ impl GrpcChangeLogger {
         }
     }
 
+    /// What a provider's `main` does in Go: a client on the sidecar's Unix socket, dialed on the
+    /// first send, and the provider version.
+    pub fn connect_unix(socket_path: &str, provider_version: String) -> Self {
+        Self::new(UnixChangeLogClient::new(socket_path)).provider_version(provider_version)
+    }
+
     /// Go `WithProviderVersion`.
     pub fn provider_version(mut self, version: impl Into<String>) -> Self {
         self.provider_version = version.into();

@@ -14,7 +14,7 @@ use crossplane_test::{self as test, MockClient, MockGetFn, MockObjectFn};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use k8s_openapi::jiff::Timestamp;
 
-use super::policy::ActionSet;
+use super::policy::{ActionSet, default_supported_management_policies};
 use super::*;
 use crate::clock::Clock;
 use crate::reconciler::{Outcome, Reconcile, Request};
@@ -1463,6 +1463,42 @@ fn pause_and_policy_cases(now: Timestamp) -> Vec<Case> {
                         })
                     }))
                     .finalizer(add_finalizer(|| Ok(())))
+            }),
+            want: Ok(Outcome::RequeueAfter(DEFAULT_POLL_INTERVAL)),
+            ..case()
+        },
+        // The two cases below set no collaborator: they run the default initializer, reference
+        // resolver, finalizer and publisher against the mock client, and the no-op connector.
+        // go: pkg/reconciler/managed TestModernReconciler/ObserveAndLateInitializePolicy
+        Case {
+            name: "ObserveAndLateInitializePolicy",
+            reason: "If management policy is set to Observe and LateInitialize, reconciliation should proceed",
+            client: MockClient {
+                get: Some(get_with(|mg| set_policies(mg, &[Observe, LateInitialize]))),
+                update: Some(test::new_mock_update_fn(None)),
+                update_status: Some(test::new_mock_sub_resource_update_fn(None)),
+                ..Default::default()
+            },
+            opts: Box::new(|b| {
+                b.management_policies()
+                    .supported_management_policies(default_supported_management_policies())
+            }),
+            want: Ok(Outcome::RequeueAfter(DEFAULT_POLL_INTERVAL)),
+            ..case()
+        },
+        // go: pkg/reconciler/managed TestModernReconciler/ObserveUpdateAndLateInitializePolicy
+        Case {
+            name: "ObserveUpdateAndLateInitializePolicy",
+            reason: "If management policy is set to Observe, Update and LateInitialize, reconciliation should proceed",
+            client: MockClient {
+                get: Some(get_with(|mg| set_policies(mg, &[Observe, Update, LateInitialize]))),
+                update: Some(test::new_mock_update_fn(None)),
+                update_status: Some(test::new_mock_sub_resource_update_fn(None)),
+                ..Default::default()
+            },
+            opts: Box::new(|b| {
+                b.management_policies()
+                    .supported_management_policies(default_supported_management_policies())
             }),
             want: Ok(Outcome::RequeueAfter(DEFAULT_POLL_INTERVAL)),
             ..case()
