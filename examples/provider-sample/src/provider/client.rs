@@ -87,8 +87,7 @@ impl Client {
             }
             None => Bytes::new(),
         };
-        // Kubernetes object names need no path escaping, so Go's `url.PathEscape` is the identity.
-        let url = format!("{}/things/{name}", self.endpoint);
+        let url = format!("{}/things/{}", self.endpoint, path_escape(name));
         let request = Request::builder()
             .method(method.clone())
             .uri(&url)
@@ -123,6 +122,19 @@ impl Client {
             ))
         })
     }
+}
+
+/// Go `url.PathEscape`. The name is the external-name annotation, which a user may set to
+/// anything.
+fn path_escape(segment: &str) -> String {
+    segment
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b'$' | b'&' | b'+' | b':' | b'=' | b'@' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn status_error(method: &Method, name: &str, code: StatusCode) -> Error {

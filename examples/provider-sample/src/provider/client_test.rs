@@ -171,3 +171,12 @@ async fn an_unreachable_service_names_the_request() {
         "{text}"
     );
 }
+
+#[tokio::test]
+async fn the_name_is_path_escaped_as_go_escapes_it() {
+    let stub = Stub::default();
+    let client = Client::with_endpoint(stub.clone().serve().await);
+    client.get("a b/c?d;e,f%$&+:=@~").await.unwrap();
+    let seen = stub.seen.lock().unwrap();
+    assert_eq!(seen[0].1, "/things/a%20b%2Fc%3Fd%3Be%2Cf%25$&+:=@~");
+}
