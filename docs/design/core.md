@@ -510,11 +510,9 @@ Integration (the merged units run together):
   messages and source component, a spec change reaching external update, the pause annotation
   stopping observes with `ReconcilePaused`, unpausing applying the change made while paused, and
   deletion calling external delete and removing the finalizer. What the first run showed:
-  - It lives inside the crate, not in `examples/provider-sample/tests`, because `RestConfig` has
-    only `infer`, which reads `KUBECONFIG` from the environment, and `unsafe_code` is forbidden,
-    so a test cannot point it at a chosen kubeconfig. A provider that wants Go's `--kubeconfig`
-    flag cannot either. Public API left unchanged; a `RestConfig::from_kubeconfig` would close
-    it.
+  - It lives inside the crate, not in `examples/provider-sample/tests`, because it builds an
+    uncached `KubeClient` and a throttled client, which are crate-private. `RestConfig::from_kubeconfig`
+    now lets a test or a `--kubeconfig` flag point the manager at a chosen file.
   - A delete within `creationGracePeriod` (30s) of a successful create waits it out: Observe
     reports not-exists, so the Pending branch (`R:1218`, before the deletion branch at `R:1231`)
     records `PendingExternalResource` and requeues until the grace period ends. Go does the same.

@@ -25,8 +25,8 @@ use leader_election::Elector;
 #[path = "leader_election.rs"]
 pub(crate) mod leader_election;
 
-/// How to reach the API server, and how fast. [`RestConfig::infer`] is the only public
-/// constructor and [`Manager::new`] the only consumer, so every request in the process carries
+/// How to reach the API server, and how fast. [`RestConfig::infer`] and
+/// [`RestConfig::from_kubeconfig`] are the public constructors and [`Manager::new`] the only consumer, so every request in the process carries
 /// the client-side throttle and the Go-style User-Agent.
 #[derive(Clone)]
 pub struct RestConfig {
@@ -45,6 +45,16 @@ impl RestConfig {
     /// (`rest/config.go:515-536`). `binary` stands in when the process has no `argv[0]`.
     pub async fn infer(binary: &str, version: &str) -> Result<Self> {
         let kube = kube::Config::infer().await.map_err(Error::foreign)?;
+        Ok(Self::from_config(kube, binary, version))
+    }
+
+    /// Like [`RestConfig::infer`], but reads the named kubeconfig file's current context and
+    /// ignores the environment, as a `--kubeconfig` flag would.
+    pub async fn from_kubeconfig(path: impl AsRef<std::path::Path>, binary: &str, version: &str) -> Result<Self> {
+        let kubeconfig = kube::config::Kubeconfig::read_from(path).map_err(Error::foreign)?;
+        let kube = kube::Config::from_custom_kubeconfig(kubeconfig, &kube::config::KubeConfigOptions::default())
+            .await
+            .map_err(Error::foreign)?;
         Ok(Self::from_config(kube, binary, version))
     }
 

@@ -273,3 +273,53 @@ fn the_leader_election_client_appends_to_the_user_agent() {
         "client-go rest.AddUserAgent"
     );
 }
+
+const KUBECONFIG: &str = "
+apiVersion: v1
+kind: Config
+current-context: other
+clusters:
+- name: one
+  cluster: {server: 'https://one.invalid:6443'}
+- name: two
+  cluster: {server: 'https://two.invalid:6443'}
+users:
+- name: u
+  user: {token: t}
+contexts:
+- name: one
+  context: {cluster: one, user: u}
+- name: other
+  context: {cluster: two, user: u}
+";
+
+fn write_kubeconfig(name: &str, contents: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("xprs-{name}-{}.yaml", std::process::id()));
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn from_kubeconfig_reads_the_current_context_of_the_named_file() {
+    let path = write_kubeconfig("from-kubeconfig", KUBECONFIG);
+    let rest = RestConfig::from_kubeconfig(&path, "xprs-test", "v1.2.3").await;
+    std::fs::remove_file(&path).unwrap();
+    let rest = rest.unwrap();
+    assert_eq!(rest.kube.cluster_url.to_string(), "https://two.invalid:6443/");
+    assert!(
+        rest.user_agent().contains("v1.2.3"),
+        "the User-Agent carries the version: {}",
+        rest.user_agent()
+    );
+}
+
+#[tokio::test]
+async fn from_kubeconfig_reports_a_missing_or_unusable_file() {
+    let missing = std::env::temp_dir().join(format!("xprs-no-such-kubeconfig-{}.yaml", std::process::id()));
+    assert!(RestConfig::from_kubeconfig(&missing, "xprs-test", "v0").await.is_err());
+
+    let unusable = write_kubeconfig("unusable-kubeconfig", "apiVersion: v1\nkind: Config\n");
+    let rest = RestConfig::from_kubeconfig(&unusable, "xprs-test", "v0").await;
+    std::fs::remove_file(&unusable).unwrap();
+    assert!(rest.is_err(), "a kubeconfig with no context names no cluster");
+}
