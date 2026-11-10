@@ -48,12 +48,17 @@ def scan(path, errors):
             errors.append(f"{where}: marker is not directly above a #[test] fn or a `Case {{` row")
 
 
+def load(path):
+    with open(path, newline="") as f:
+        return [(r["package"], r["test"], r["case"]) for r in csv.DictReader(f, delimiter="\t")]
+
+
 def main():
     root = pathlib.Path(sys.argv[1])
     flags = set(sys.argv[2:])
-    with open(root / "docs/phase0/port-denominator.tsv", newline="") as f:
-        denominator = [(r["package"], r["test"], r["case"]) for r in csv.DictReader(f, delimiter="\t")]
-    known = set(denominator)
+    denominator = load(root / "docs/phase0/port-denominator.tsv")
+    extra = load(root / "docs/port-extra.tsv")
+    known = set(denominator) | set(extra)
     errors = []
 
     ported, ignored = {}, {}
@@ -61,7 +66,7 @@ def main():
     for path in files:
         for key, is_ignored, where in scan(path, errors):
             if key not in known:
-                errors.append(f"{where}: {key[0]} {key[1]}/{key[2]} is not in the denominator")
+                errors.append(f"{where}: {key[0]} {key[1]}/{key[2]} is not in the denominator or port-extra.tsv")
             elif key in ported or key in ignored:
                 errors.append(f"{where}: {key[0]} {key[1]}/{key[2]} is already marked at {(ported | ignored)[key]}")
             else:
@@ -72,7 +77,7 @@ def main():
         for n, r in enumerate(csv.DictReader(f, delimiter="\t"), start=2):
             key, where = (r["package"], r["test"], r["case"]), f"docs/port-skips.tsv:{n}"
             if key not in known:
-                errors.append(f"{where}: {key[0]} {key[1]}/{key[2]} is not in the denominator")
+                errors.append(f"{where}: {key[0]} {key[1]}/{key[2]} is not in the denominator or port-extra.tsv")
             elif not (r["reason"] or "").strip():
                 errors.append(f"{where}: skip has no reason")
             elif key in ported:
@@ -80,9 +85,11 @@ def main():
             else:
                 skipped[key] = where
 
-    missing = [k for k in denominator if k not in ported and k not in skipped]
-    print(f"denominator {len(denominator)}  ported {len(ported)}  skipped {len(skipped)}  "
-          f"missing {len(missing)}  (ignored, counted as missing: {len(ignored)})")
+    missing = [k for k in denominator + extra if k not in ported and k not in skipped]
+    for label, rows in (("denominator", denominator), ("outside the denominator (docs/port-extra.tsv)", extra)):
+        rows = set(rows)
+        print(f"{label} {len(rows)}  ported {len(rows & ported.keys())}  skipped {len(rows & skipped.keys())}  "
+              f"missing {len(rows & set(missing))}  (ignored, counted as missing: {len(rows & ignored.keys())})")
     for key, where in sorted(ported.items()):
         print(f"  ported   {key[0]} {key[1]}/{key[2]}  {pathlib.Path(where).relative_to(root)}")
     for key, where in sorted(ignored.items()):

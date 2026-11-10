@@ -190,9 +190,8 @@ Deviations of the scaffold from the synthesis brief:
 - Bodies that are real but have no test yet. They were kept because something run here executes
   them or because the base had them real, and the unit that owns each must test or replace it:
   the kube client verb mapping (1.4), the reconcile timeout and grace wrapper and the phase
-  skeleton of `Run` beyond the two ported branches (1.6), `policy.rs` (1.6), the driver `work`
-  loop (1.9; `queue_op` is tested), the derive expansion and `controller_gen_compat` (exercised
-  by crd-diff only; 1.10 and 1.2).
+  skeleton of `Run` beyond the two ported branches (1.6), `policy.rs` (1.6), the derive
+  expansion and `controller_gen_compat` (exercised by crd-diff only; 1.10 and 1.2).
 - The provider's HTTP client (`examples/provider-sample/src/provider/client.rs`) is `todo!()`;
   it lands with the template in unit 2.3.
 - `main.rs` mirrors only the environment variables Go names explicitly, not kingpin's
@@ -269,6 +268,44 @@ Unit 1.4 (client seam, test support):
   (`crossplane-test/tests/support.rs`, `new_mock_response_fn`) and against a real API server
   (`kube_client_test.rs`: a status set in memory is gone after the PUT). No Go table case pins it.
 
+Unit 1.9, queue half (work queue, driver, rate limiters):
+
+- The work queue follows controller-runtime v0.24.1's priority queue, not client-go's classic
+  queue, because the baseline runs the priority queue (`cr:pkg/controller/controller.go:252-271`;
+  `UsePriorityQueue` is unset in the baseline and in `xpr:pkg/controller/options.go:83-91`). The
+  two differ per object, so this is not only ordering. The priority queue holds one entry per
+  key (`priorityqueue.go:219-277`). A plain `Add` of a waiting key makes it ready and cancels the
+  delay (`:239-240,261-264`), where client-go's delaying queue keeps the heap entry and adds the
+  key again when it fires (`cg:util/workqueue/delaying_queue.go:298-307,330-335`). So a watch
+  event during a `RequeueAfter` wait gives one reconcile, not two, and a `RequeueAfter` returned
+  by a reconcile that an event arrived during is absorbed. `ShutDown` stops `Get` at once and
+  queued keys are dropped (`priorityqueue.go:424-428,475-484`); client-go's `ShutDown` lets `Get`
+  drain the queue first. The scaffold's `dirty`/`processing`/heap `State` is replaced by
+  `items`/`ready`/`waiting`/`locked`, Go's own fields. Priorities are not ported.
+- `queue_op` maps `RequeueAfter(Duration::ZERO)` to `Forget`: Go tests `RequeueAfter > 0`
+  (`cr:pkg/internal/controller/controller.go:495`), so a zero delay is plain success, not an
+  immediate requeue.
+- `ControllerOptions::default()` now sets `recover_panic: true`. An unset `RecoverPanic` counts
+  as true in controller-runtime (`controller.go:199`); the baseline sets it true anyway.
+- A recovered panic becomes `Error::new("panic: <message> [recovered]")`, Go's format
+  (`controller.go:203`). With `recover_panic` off, `driver::run` resumes the panic, as an
+  unrecovered panic in a Go worker ends the process.
+- `ratelimiter::Reconciler::new` keeps its `name` parameter but does not use it. Go keys the
+  limiter by `name + request`; `RateLimiter` is keyed by `Request`, which is the same for the
+  global bucket because a bucket ignores the item.
+- client-go's `MaxOfRateLimiter`, `ItemFastSlowRateLimiter` and `WithMaxWaitRateLimiter` are
+  not ported. `NewController` is the exponential limiter alone (`xpr:pkg/ratelimiter/default.go:42-44`;
+  its doc comment saying it takes the maximum with another limiter is stale), and MaxOf appears
+  only in `DefaultControllerRateLimiter`, which controller-runtime uses only with the priority
+  queue off. The bucket applies only through the global wrapper.
+- The `governor` dependency stays dropped. The bucket is a few lines hand-written over
+  `golang.org/x/time/rate`'s arithmetic, so Go's grant-and-go-into-debt `Reserve` (open
+  question 2) is copied exactly instead of mapped onto another crate's model.
+- `hack/port-coverage.py` reads a second listing, `docs/port-extra.tsv`, of Go cases outside the
+  denominator that are ported as the spec for code the runtime owns (client-go workqueue,
+  controller-runtime controller and priority queue). Their markers and skips follow the same
+  rules and are counted on a second summary line, never in the denominator's.
+
 ## Verification
 
 Rerun these; each was run on the scaffold.
@@ -283,16 +320,32 @@ Rerun these; each was run on the scaffold.
   excluded and counted. Go YAML is converted at run time with `kubectl patch --local`, which
   contacts no cluster. Removing the `managementPolicies` schema default makes it exit 1.
 - `hack/port-coverage.sh`: 2 of 377 ported.
+- Unit 1.9 queue half: the `controller::workqueue`, `controller::driver` and `ratelimiter` tests,
+  including a multi-thread stress test (6 producers, 8 workers, 4 keys) asserting no overlapping
+  reconcile of one key and no lost add. Timing tests run on tokio's paused clock.
 
 ## Open questions and risks
 
 None of these is resolved by the scaffold.
 
-1. Nobody has implemented the work queue. Does `controller/workqueue.rs` need client-go's exact
-   dirty and processing sets and its delaying heap, or is a smaller structure observably the same
-   under the harness?
-2. `GlobalRateLimiter`: Go's bucket limiter reserves a token and returns the delay. Which
-   reserve semantics does the Rust limiter need for `when` to return the same delays?
+1. Answered (unit 1.9). Neither client-go's dirty and processing sets nor its delaying heap is
+   what the baseline runs; it runs controller-runtime's priority queue, and its per-object
+   behaviour differs from client-go's (see "Implementation reconciliation", unit 1.9). The Rust
+   queue holds Go's priority-queue state minus priorities: a key-to-entry map, ready items by
+   insertion counter, waiting items by ready time, and a locked set. Each part is needed: the
+   map gives one entry per key, the locked set keeps a held key from a second worker, the
+   waiting order gives earliest-deadline wakeups. Mutations that hand out a locked key, keep a
+   delay beside a plain add, or let the later delay win each fail ported cases.
+2. Answered (unit 1.9). `BucketRateLimiter.When` is `Limiter.Reserve().Delay()`
+   (`cg:util/workqueue/default_rate_limiters.go:68-70`). `Reserve` is `reserveN(now, 1,
+   InfDuration)` (`golang.org/x/time@v0.15.0/rate/rate.go:207-209,227-230`), which always grants when
+   `n <= burst`, stores the bucket's tokens even when negative and returns the time to wait
+   (`rate.go:350-377`); nothing cancels the reservation. So the token is consumed when the
+   wrapper skips the reconcile and returns `RequeueAfter`. The wrapper then records the request
+   as limited and lets it through without a second `When` when it returns
+   (`xpr:pkg/ratelimiter/reconciler.go:65-98`), so each pass costs exactly one token. The Rust
+   bucket implements exactly this, in Go's float arithmetic (`advance`, `durationFromTokens`).
+   With rate 0 and burst 0 it returns Go's `InfDuration`.
 3. Is the reconcile-request default right? `Managed::TRACKS_RECONCILE_REQUESTS` is off unless
    the derive is told otherwise, which matches the Go baseline; on is what a user of
    `status.lastHandledReconcileAt` expects.
@@ -300,7 +353,13 @@ None of these is resolved by the scaffold.
    vanished while the watch was down, as client-go's `DeletedFinalStateUnknown` does?
 5. The event correlator is unimplemented. Which of client-go's aggregation and spam-filter rules
    are observable in the parity traces?
-6. At the outer deadline the reconciler drops the whole run and returns a deadline error. Go lets
+6. Driver side answered (unit 1.9): the driver adds no reconcile timeout, because
+   controller-runtime's `ReconciliationTimeout` is unset in the baseline; the managed reconciler
+   owns the timeout. What the driver guarantees is that a key is released on every exit path
+   (normal return, recovered panic, unrecovered panic, the worker's future dropped
+   mid-reconcile), through a drop guard as Go defers `Done` (`controller.go:432`).
+   `a_dropped_reconcile_releases_its_key` tests the dropped case. The rest of this question
+   stays with 1.6: at the outer deadline the reconciler drops the whole run and returns a deadline error. Go lets
    each later Kubernetes call fail on the expired context and carries on through the remaining
    branches. Is the difference observable (status writes, events), and if so which side changes?
 7. No ported case exercises Update overwriting the in-memory object (parity spec S5). Which Go

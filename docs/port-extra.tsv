@@ -1,0 +1,57 @@
+package	file	line	test	case
+k8s.io/client-go/util/workqueue	queue_test.go	48	TestBasic	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	112	TestAddWhileProcessing	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	172	TestLen	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	188	TestReinsert	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	218	TestCollapse	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	247	TestCollapseWhileProcessing	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	300	TestQueueDrainageUsingShutDownWithDrain	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	332	TestNoQueueDrainageUsingShutDown	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	355	TestForceQueueShutdownUsingShutDown	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	388	TestQueueDrainageUsingShutDownWithDrainWithDirtyItem	(no table)
+k8s.io/client-go/util/workqueue	queue_test.go	430	TestGarbageCollection	(no table)
+k8s.io/client-go/util/workqueue	delaying_queue_test.go	30	TestSimpleQueue	(no table)
+k8s.io/client-go/util/workqueue	delaying_queue_test.go	72	TestDeduping	(no table)
+k8s.io/client-go/util/workqueue	delaying_queue_test.go	128	TestAddTwoFireEarly	(no table)
+k8s.io/client-go/util/workqueue	delaying_queue_test.go	177	TestCopyShifting	(no table)
+k8s.io/client-go/util/workqueue	rate_limiting_queue_test.go	26	TestRateLimitingQueue	(no table)
+k8s.io/client-go/util/workqueue	default_rate_limiters_test.go	24	TestItemExponentialFailureRateLimiter	(no table)
+k8s.io/client-go/util/workqueue	default_rate_limiters_test.go	66	TestItemExponentialFailureRateLimiterOverFlow	(no table)
+k8s.io/client-go/util/workqueue	default_rate_limiters_test.go	99	TestItemFastSlowRateLimiter	(no table)
+k8s.io/client-go/util/workqueue	default_rate_limiters_test.go	141	TestMaxOfRateLimiter	(no table)
+k8s.io/client-go/util/workqueue	default_rate_limiters_test.go	186	TestWithMaxWaitRateLimiter	(no table)
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	21	TestControllerWorkqueue	returns an item
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	34	TestControllerWorkqueue	returns items in order
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	50	TestControllerWorkqueue	doesn't return an item that is currently locked
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	68	TestControllerWorkqueue	returns an item as soon as its unlocked
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	91	TestControllerWorkqueue	de-duplicates items
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	107	TestControllerWorkqueue	enqueues a locked item
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	131	TestControllerWorkqueue	retains the highest priority
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	148	TestControllerWorkqueue	will not decrease the priority
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	165	TestControllerWorkqueue	gets pushed to the front if the priority increases
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	184	TestControllerWorkqueue	retains the lowest after duration
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	200	TestControllerWorkqueue	doesn't include non-ready items in Len()
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	215	TestControllerWorkqueue	Get from priority queue might get stuck when the priority queue is shut down
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	234	TestControllerWorkqueue	returns many items
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	266	TestControllerWorkqueue	updates metrics correctly for an item that gets initially added with after and then without
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	295	TestControllerWorkqueue	updates metrics correctly when an item with after is re-added with higher priority and no after
+sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue	priorityqueue_test.go	324	TestControllerWorkqueue	follows FIFO order in the new priority queue when item priority changes
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	95	TestSource	Reconciler should call the Reconciler function
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	105	TestSource	Reconciler should not recover panic if RecoverPanic is false
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	118	TestSource	Reconciler should recover panic if RecoverPanic is true by default
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	133	TestSource	Reconciler should recover panic if RecoverPanic is true
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	148	TestSource	Reconciler should time out if ReconciliationTimeout is set
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	282	TestSource	Reconciler should not configure a timeout if ReconciliationTimeout is zero
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	804	TestSource	Processing queue items from a Controller should call Reconciler if an item is enqueued
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	820	TestSource	Processing queue items from a Controller should requeue a Request if there is an error and continue processing items
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	844	TestSource	Processing queue items from a Controller should not requeue a Request if there is a terminal error
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	865	TestSource	Processing queue items from a Controller should not reset backoff until there's a non-error result
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	901	TestSource	Processing queue items from a Controller should requeue a Request with rate limiting if the Result sets Requeue:true and continue processing items
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	931	TestSource	Processing queue items from a Controller should retain the priority when the reconciler requests a requeue
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	960	TestSource	Processing queue items from a Controller should use the priority from Result when the reconciler requests a requeue
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	989	TestSource	Processing queue items from a Controller should requeue a Request after a duration (but not rate-limited) if the Result sets RequeueAfter (regardless of Requeue)
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	1019	TestSource	Processing queue items from a Controller should retain the priority with RequeueAfter
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	1048	TestSource	Processing queue items from a Controller should use the priority from Result with RequeueAfter
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	1077	TestSource	Processing queue items from a Controller should perform error behavior if error is not nil, regardless of RequeueAfter
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	1106	TestSource	Processing queue items from a Controller should retain the priority when there was an error
+sigs.k8s.io/controller-runtime/pkg/internal/controller	controller_test.go	1135	TestSource	Processing queue items from a Controller should use the priority from Result when there was an error

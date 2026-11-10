@@ -1,19 +1,25 @@
 //! Runs one reconciler over a plain stream of keys. It knows nothing of kube, so a test feeds it
 //! keys directly; `Controller::keys` builds the real stream from informers.
 
+use std::any::Any;
+use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossplane_core::errors::Result;
-use futures::Stream;
+use crossplane_core::errors::{Error, Result};
+use futures::{FutureExt, Stream, StreamExt};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use super::ControllerOptions;
 use super::workqueue::WorkQueue;
 use crate::reconciler::{Outcome, Reconcile, Request};
 
-/// Feeds `keys` into a work queue and runs `max_concurrent_reconciles` workers until `shutdown`.
-/// In-flight reconciles finish first.
+/// Feeds `keys` into a work queue and runs `max_concurrent_reconciles` workers until `shutdown`,
+/// as controller-runtime's `Controller.Start` does. On shutdown the queue stops handing out
+/// items and in-flight reconciles finish. A reconciler panic with `recover_panic` off is resumed
+/// here, the way an unrecovered panic in a Go worker ends the process.
 pub(super) async fn run(
     name: String,
     keys: impl Stream<Item = Request> + Send + 'static,
@@ -21,24 +27,57 @@ pub(super) async fn run(
     options: ControllerOptions,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let queue = WorkQueue::new(options.rate_limiter.clone());
-    let _ = (
-        std::pin::pin!(keys),
-        work(&queue, &*reconciler, options.recover_panic),
-        shutdown,
-    );
-    // TODO: spawn: keys -> queue.add; spawn max_concurrent_reconciles x `work` inside a span
-    // `controller = name`; on shutdown: queue.shut_down(), join the workers.
-    todo!("run controller {name}")
+    let queue = Arc::new(WorkQueue::new(options.rate_limiter.clone()));
+    let span = tracing::info_span!("controller", controller = %name);
+
+    // A JoinSet, not a bare spawn, so that dropping `run` also stops the feeder.
+    let mut feeder = JoinSet::new();
+    feeder.spawn({
+        let queue = queue.clone();
+        async move {
+            let mut keys = std::pin::pin!(keys);
+            while let Some(key) = keys.next().await {
+                queue.add(key);
+            }
+        }
+    });
+
+    let mut workers = JoinSet::new();
+    for _ in 0..options.max_concurrent_reconciles.max(1) {
+        let worker = work(queue.clone(), reconciler.clone(), options.recover_panic);
+        workers.spawn(worker.instrument(span.clone()));
+    }
+
+    let panicked = tokio::select! {
+        () = shutdown.cancelled() => None,
+        Some(Err(err)) = workers.join_next() => err.try_into_panic().ok(),
+    };
+    queue.shut_down();
+    feeder.abort_all();
+    if let Some(panic) = panicked {
+        resume_unwind(panic);
+    }
+    while let Some(joined) = workers.join_next().await {
+        if let Err(err) = joined
+            && let Ok(panic) = err.try_into_panic()
+        {
+            resume_unwind(panic);
+        }
+    }
+    Ok(())
 }
 
 /// One worker: take a request, reconcile it, tell the queue what happened.
-async fn work(queue: &WorkQueue, reconciler: &dyn Reconcile, recover_panic: bool) {
+async fn work(queue: Arc<WorkQueue>, reconciler: Arc<dyn Reconcile>, recover_panic: bool) {
     while let Some(request) = queue.get().await {
-        // TODO: with recover_panic, a panic in the reconciler becomes an error, as
-        // controller-runtime's RecoverPanic does.
-        let _ = recover_panic;
-        let result = reconciler.reconcile(&request).await;
+        let _held = Held {
+            queue: &queue,
+            request: &request,
+        };
+        let result = reconcile(&*reconciler, &request, recover_panic).await;
+        if let Err(err) = &result {
+            tracing::error!(error = %err, "Reconciler error");
+        }
         match queue_op(&result) {
             QueueOp::Forget => queue.forget(&request),
             QueueOp::ForgetAndAddAfter(delay) => {
@@ -47,7 +86,41 @@ async fn work(queue: &WorkQueue, reconciler: &dyn Reconcile, recover_panic: bool
             }
             QueueOp::AddRateLimited => queue.add_rate_limited(request.clone()),
         }
-        queue.done(&request);
+    }
+}
+
+/// Releases the item when the worker is done with it, also when the reconcile panics or the
+/// worker's future is dropped mid-reconcile, so a key is never left held. Go defers `Done` for
+/// the same reason (`pkg/internal/controller/controller.go:432`).
+struct Held<'a> {
+    queue: &'a WorkQueue,
+    request: &'a Request,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.queue.done(self.request);
+    }
+}
+
+/// controller-runtime `Controller.Reconcile`: a panic becomes an error when `recover_panic` is
+/// set (`pkg/internal/controller/controller.go:194-208`).
+async fn reconcile(reconciler: &dyn Reconcile, request: &Request, recover_panic: bool) -> Result<Outcome> {
+    let run = AssertUnwindSafe(async { reconciler.reconcile(request).await }).catch_unwind();
+    match run.await {
+        Ok(result) => result,
+        Err(panic) if recover_panic => Err(Error::new(format!("panic: {} [recovered]", panic_message(&*panic)))),
+        Err(panic) => resume_unwind(panic),
+    }
+}
+
+fn panic_message(panic: &(dyn Any + Send)) -> &str {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        s
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s
+    } else {
+        "Box<dyn Any>"
     }
 }
 
@@ -59,30 +132,16 @@ enum QueueOp {
 }
 
 /// The one place Go's four outcomes meet the queue: controller-runtime `reconcileHandler`
-/// (`pkg/internal/controller/controller.go:482-513`).
+/// (`pkg/internal/controller/controller.go:477-513`). Go tests `RequeueAfter > 0`, so a zero
+/// delay is plain success.
 fn queue_op(result: &Result<Outcome>) -> QueueOp {
     match result {
         Err(_) | Ok(Outcome::Requeue) => QueueOp::AddRateLimited,
-        Ok(Outcome::RequeueAfter(delay)) => QueueOp::ForgetAndAddAfter(*delay),
-        Ok(Outcome::Done) => QueueOp::Forget,
+        Ok(Outcome::RequeueAfter(delay)) if *delay > Duration::ZERO => QueueOp::ForgetAndAddAfter(*delay),
+        Ok(Outcome::RequeueAfter(_) | Outcome::Done) => QueueOp::Forget,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use crossplane_core::errors::Error;
-
-    use super::*;
-
-    #[test]
-    fn queue_ops_match_controller_runtime() {
-        let minute = Duration::from_secs(60);
-        assert_eq!(queue_op(&Ok(Outcome::Done)), QueueOp::Forget);
-        assert_eq!(queue_op(&Ok(Outcome::Requeue)), QueueOp::AddRateLimited);
-        assert_eq!(
-            queue_op(&Ok(Outcome::RequeueAfter(minute))),
-            QueueOp::ForgetAndAddAfter(minute)
-        );
-        assert_eq!(queue_op(&Err(Error::new("boom"))), QueueOp::AddRateLimited);
-    }
-}
+#[path = "driver_test.rs"]
+mod tests;

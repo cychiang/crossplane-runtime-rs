@@ -75,8 +75,10 @@ impl Options {
 }
 
 impl Default for ControllerOptions {
-    /// controller-runtime's own defaults, used when `with_options` is not called: one worker and
-    /// a 5ms to 1000s per-item backoff.
+    /// controller-runtime's own defaults, used when `with_options` is not called: one worker, a
+    /// 5ms to 1000s per-item backoff (`pkg/controller/controller.go:252-258`), and panics
+    /// recovered, because an unset `RecoverPanic` counts as true
+    /// (`pkg/internal/controller/controller.go:199`).
     fn default() -> Self {
         Self {
             max_concurrent_reconciles: 1,
@@ -84,7 +86,7 @@ impl Default for ControllerOptions {
                 Duration::from_millis(5),
                 Duration::from_secs(1000),
             )),
-            recover_panic: false,
+            recover_panic: true,
         }
     }
 }

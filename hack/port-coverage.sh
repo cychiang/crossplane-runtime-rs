@@ -13,6 +13,11 @@
 #
 # A Go case is skipped when docs/port-skips.tsv lists it with a reason.
 #
+# docs/port-extra.tsv lists Go cases outside the denominator that are ported as behavioural
+# specs for code the runtime owns (client-go's queue, controller-runtime's controller). Their
+# markers and skips follow the same rules; they are counted on a second summary line and never in
+# the denominator's numbers.
+#
 # Exits non-zero when a marker or skip names something the denominator does not have, a marker
 # is attached to nothing, a table row's name disagrees with its marker, a case is marked twice
 # or both ported and skipped, or a skip has no reason. With --complete it also exits non-zero
